@@ -1,4 +1,5 @@
 #include "server-task.h"
+#include <filesystem>
 
 #include "build-info.h"
 #include "server-chat.h"
@@ -9,6 +10,8 @@
 #include "sampling.h"
 #include "speculative.h"
 #include "server-common.h"
+
+#include <cmath>
 
 using json = nlohmann::ordered_json;
 
@@ -1172,7 +1175,7 @@ json server_task_result_cmpl_partial::to_json_oaicompat_chat() {
 
     std::vector<json> deltas;
     auto add_delta = [&](const json & delta) {
-        deltas.push_back({
+        json event = {
             {"choices", json::array({
                 json {
                     {"finish_reason", nullptr},
@@ -1185,7 +1188,8 @@ json server_task_result_cmpl_partial::to_json_oaicompat_chat() {
             {"model", oaicompat_model},
             {"system_fingerprint", std::string(llama_build_info())},
             {"object", "chat.completion.chunk"},
-        });
+        };
+        deltas.push_back(std::move(event));
     };
     // We have to send an initial update to conform to openai behavior
     if (first || is_progress) {
@@ -1197,6 +1201,48 @@ json server_task_result_cmpl_partial::to_json_oaicompat_chat() {
 
     for (const auto & diff : oaicompat_msg_diffs) {
         add_delta(server_chat_msg_diff_to_json_oaicompat(diff));
+    }
+
+    // A partial result may contain separate reasoning and visible deltas, but
+    // prob_output represents one sampled token. Attach it once, in stream
+    // order, to the final delta rather than duplicating it on every chunk.
+    if (nram_token_evidence && prob_output.tok >= 0 && prob_output.probs.size() <= 20 && !deltas.empty()) {
+        json candidates = json::array();
+        for (size_t rank = 0; rank < prob_output.probs.size(); ++rank) {
+            const auto & candidate = prob_output.probs[rank];
+            if (!std::isfinite(candidate.prob) || candidate.prob < 0.0f || candidate.prob > 1.0f || candidate.txt.size() > 256) {
+                continue;
+            }
+            candidates.push_back({
+                {"token_id", candidate.tok}, {"text", candidate.txt}, {"rank", rank + 1},
+                {"probability", candidate.prob},
+                {"logprob", candidate.prob > 0.0f ? json(std::log(candidate.prob)) : json(nullptr)},
+                {"selected", candidate.tok == prob_output.tok},
+            });
+        }
+        deltas.back()["x_nram_token_evidence"] = {
+            {"schema", "llamacpp.token-evidence.v1"},
+            {"slot_id", nram_slot_id},
+            {"event_index", n_decoded - 1},
+            {"candidate_distribution_stage", "post_sampling_probs"},
+            {"tokens", json::array({json{
+                {"token_id", prob_output.tok},
+                {"text", prob_output.text_to_send.size() <= 256 ? prob_output.text_to_send : std::string()},
+                {"selected_logprob", std::isfinite(prob_output.prob) && prob_output.prob > 0.0f ? json(std::log(prob_output.prob)) : json(nullptr)},
+                {"selected_probability", std::isfinite(prob_output.prob) ? prob_output.prob : 0.0f},
+                {"candidates", candidates},
+            }})},
+            {"logical_context", {
+                {"source", "llama.cpp_slot_state"},
+                // prompt is the active logical sequence, including generated
+                // tokens; it is not inferred from streamed text.
+                {"used", std::max(0, nram_context_used)},
+                {"capacity", std::max(0, nram_context_capacity)},
+                {"prompt_tokens", std::max(0, n_prompt_tokens)},
+                {"generated_tokens", std::max(0, n_decoded)},
+                {"cached_tokens", std::max(0, n_prompt_tokens_cache)},
+            }},
+        };
     }
 
     if (!deltas.empty()) {
@@ -1638,6 +1684,24 @@ json server_task_result_slot_erase::to_json() {
 }
 
 //
+// server_task_result_get_cvector
+//
+
+json server_task_result_get_cvector::to_json() {
+    json result = json::array();
+    for (size_t i = 0; i < cvectors.size(); ++i) {
+        auto & cvec = cvectors[i];
+        json entry = {
+            {"id",            i},
+            {"name",          std::filesystem::path(cvec.fname).filename().string()},
+            {"scale",         cvec.strength},
+        };
+        result.push_back(std::move(entry));
+    }
+    return result;
+}
+
+//
 // server_task_result_get_lora
 //
 
@@ -1659,6 +1723,18 @@ json server_task_result_get_lora::to_json() {
         result.push_back(std::move(entry));
     }
     return result;
+}
+
+//
+// server_task_result_apply_cvector
+//
+
+json server_task_result_apply_cvector::to_json() {
+    return json {
+        {"success", true}, {"epoch", epoch}, {"cache_invalidated", cache_invalidated},
+        {"target_applied", target_applied}, {"draft_applied", draft_applied},
+        {"draft_compatible", draft_applied},
+    };
 }
 
 //

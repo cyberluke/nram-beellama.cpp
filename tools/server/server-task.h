@@ -37,6 +37,8 @@ enum server_task_type {
     SERVER_TASK_TYPE_SLOT_SAVE,
     SERVER_TASK_TYPE_SLOT_RESTORE,
     SERVER_TASK_TYPE_SLOT_ERASE,
+    SERVER_TASK_TYPE_GET_CVEC,
+    SERVER_TASK_TYPE_SET_CVEC,
     SERVER_TASK_TYPE_GET_LORA,
     SERVER_TASK_TYPE_SET_LORA,
 };
@@ -65,6 +67,11 @@ struct task_params {
     bool cache_prompt    = true; // remember the prompt to avoid reprocessing all prompt
     bool return_tokens   = false;
     bool return_progress = false;
+
+    // Namespaced, opt-in NRAM observability; ordinary OpenAI requests do not
+    // populate or serialize these fields.
+    bool nram_token_evidence = false;
+    int32_t nram_token_evidence_n_probs = 0;
 
     int32_t sse_ping_interval = 30; // seconds between SSE comment pings while the stream stays silent, -1 disables
 
@@ -184,6 +191,9 @@ struct server_task {
 
     // used by SERVER_TASK_TYPE_METRICS
     bool metrics_reset_bucket = false;
+
+    // used by SERVER_TASK_TYPE_SET_CVEC
+    std::map<int, float> set_cvector; // mapping control vector ID -> scale
 
     // used by SERVER_TASK_TYPE_SET_LORA
     std::map<int, float> set_lora; // mapping adapter ID -> scale
@@ -440,6 +450,11 @@ struct server_task_result_cmpl_partial : server_task_result {
     int32_t n_prompt_tokens;
     int32_t n_prompt_tokens_cache;
 
+    bool nram_token_evidence = false;
+    int32_t nram_slot_id = -1;
+    int32_t nram_context_used = 0;
+    int32_t nram_context_capacity = 0;
+
     bool post_sampling_probs;
     bool is_progress = false;
     bool is_begin = false; // whether to send 200 status to HTTP client (begin of SSE stream)
@@ -596,6 +611,12 @@ struct server_task_result_control : server_task_result {
     }
 };
 
+struct server_task_result_get_cvector : server_task_result {
+    std::vector<common_control_vector_load_info> cvectors;
+
+    virtual json to_json() override;
+};
+
 struct server_task_result_get_lora : server_task_result {
     struct lora {
         common_adapter_lora_info info;
@@ -604,6 +625,14 @@ struct server_task_result_get_lora : server_task_result {
     };
     std::vector<lora> loras;
 
+    virtual json to_json() override;
+};
+
+struct server_task_result_apply_cvector : server_task_result {
+    uint64_t epoch = 0;
+    bool cache_invalidated = false;
+    bool target_applied = false;
+    bool draft_applied = false;
     virtual json to_json() override;
 };
 

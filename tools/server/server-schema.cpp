@@ -34,6 +34,17 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
     add((new field_bool("return_tokens", params.return_tokens))
         ->set_desc("Return the raw generated token ids in the `tokens` field"));
 
+    // Internal, bounded state populated only by the namespaced NRAM request
+    // extension in oaicompat_chat_params_parse().  Direct public requests are
+    // rejected there before schema evaluation, so these fields cannot bypass
+    // the opt-in contract while still reaching task_params.
+    add((new field_bool("nram_token_evidence", params.nram_token_evidence))
+        ->set_desc("Internal NRAM token-evidence opt-in; not a public request field"));
+
+    add((new field_num("nram_token_evidence_n_probs", params.nram_token_evidence_n_probs))
+        ->set_hard_limits(1, 20)
+        ->set_desc("Internal bounded NRAM token-evidence candidate count"));
+
     add((new field_bool("return_progress", params.return_progress))
         ->set_desc("Include prompt processing progress events in stream mode"));
 

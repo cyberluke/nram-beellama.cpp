@@ -9,6 +9,7 @@
 #include "llama.h"
 
 #include <set>
+#include <chrono>
 #include <sstream>
 #include <string>
 #include <string_view>

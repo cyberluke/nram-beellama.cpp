@@ -62,6 +62,7 @@ enum error_type {
     ERROR_TYPE_UNAVAILABLE, // custom error
     ERROR_TYPE_NOT_SUPPORTED, // custom error
     ERROR_TYPE_EXCEED_CONTEXT_SIZE, // custom error
+    ERROR_TYPE_CVECTOR_BUSY,
 };
 
 // thin wrapper around common_grammar_trigger with (de)serialization functions
@@ -116,6 +117,7 @@ bool lora_should_clear_cache(
         const std::vector<common_adapter_lora_info> & current,
         const std::vector<common_adapter_lora_info> & next);
 
+std::map<int, float> parse_cvector_request(const json & data);
 std::map<int, float> parse_lora_request(const json & data);
 
 bool are_lora_equal(

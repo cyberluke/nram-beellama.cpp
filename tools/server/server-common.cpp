@@ -13,6 +13,7 @@
 #include <sstream>
 #include <fstream>
 #include <limits>
+#include <cstdlib>
 
 json format_error_response(const std::string & message, const enum error_type type) {
     std::string type_str;
@@ -49,6 +50,10 @@ json format_error_response(const std::string & message, const enum error_type ty
         case ERROR_TYPE_EXCEED_CONTEXT_SIZE:
             type_str = "exceed_context_size_error";
             code = 400;
+            break;
+        case ERROR_TYPE_CVECTOR_BUSY:
+            type_str = "cvector_server_busy";
+            code = 409;
             break;
     }
     return json {
@@ -126,6 +131,29 @@ bool lora_should_clear_cache(
     return (
         !(lora_get_enabled_ids(current).empty() || lora_all_alora(current)) ||
         !lora_all_alora(next));
+}
+
+std::map<int, float> parse_cvector_request(const json & data) {
+    std::map<int, float> cvectors;
+
+    for (const auto & entry : data) {
+        if (!entry.is_object() || !entry.contains("id") || !entry.contains("scale") ||
+            !entry.at("id").is_number_integer() || !entry.at("scale").is_number()) {
+            throw std::invalid_argument("CVECTOR_INVALID_ENTRY");
+        }
+        const int id = entry.at("id").get<int>();
+        const float scale = entry.at("scale").get<float>();
+        const char * limit_text = std::getenv("NRAM_CVECTOR_MAX_ABS_SCALE");
+        const float limit = limit_text ? std::strtof(limit_text, nullptr) : 4.0f;
+        if (id < 0 || !std::isfinite(scale) || !std::isfinite(limit) || limit <= 0.0f || std::abs(scale) > limit) {
+            throw std::invalid_argument("CVECTOR_INVALID_SCALE");
+        }
+        if (!cvectors.emplace(id, scale).second) {
+            throw std::invalid_argument("CVECTOR_DUPLICATE_ID");
+        }
+    }
+
+    return cvectors;
 }
 
 std::map<int, float> parse_lora_request(const json & data) {
@@ -1151,10 +1179,42 @@ json oaicompat_chat_params_parse(
         throw std::invalid_argument("top_logprobs requires logprobs to be set to true");
     }
 
+    // Strictly namespaced and opt-in.  The native extension only exposes the
+    // sampled token and a bounded post-sampling candidate list; it never
+    // accepts or forwards arbitrary/full logits.
+    if (body.contains("x_nram_token_evidence")) {
+        const auto & evidence = body.at("x_nram_token_evidence");
+        if (!evidence.is_object() || !json_value(evidence, "enabled", false)) {
+            throw std::invalid_argument("x_nram_token_evidence.enabled must be true");
+        }
+        if (!json_value(evidence, "return_tokens", false)) {
+            throw std::invalid_argument("x_nram_token_evidence.return_tokens must be true");
+        }
+        const int n_probs = json_value(evidence, "n_probs", 0);
+        if (n_probs < 1 || n_probs > 20) {
+            throw std::invalid_argument("x_nram_token_evidence.n_probs must be between 1 and 20");
+        }
+        llama_params["n_probs"] = n_probs;
+        llama_params["post_sampling_probs"] = true;
+        llama_params["nram_token_evidence"] = true;
+        llama_params["nram_token_evidence_n_probs"] = n_probs;
+    }
+
+    // These are implementation fields, not public request fields. Rejecting
+    // them prevents callers from bypassing the namespaced opt-in above.
+    if (body.contains("nram_token_evidence") || body.contains("nram_token_evidence_n_probs")) {
+        throw std::invalid_argument("nram_token_evidence fields require x_nram_token_evidence");
+    }
+
     // Copy remaining properties to llama_params
     // This allows user to use llama.cpp-specific params like "mirostat", ... via OAI endpoint.
     // See "launch_slot_with_task()" for a complete list of params supported by llama.cpp
     for (const auto & item : body.items()) {
+        // The namespaced extension is parsed above into bounded internal
+        // fields; never pass its object through generic parameter handling.
+        if (item.key() == "x_nram_token_evidence") {
+            continue;
+        }
         // Exception: if "n_predict" is present, we overwrite the value specified earlier by "max_tokens"
         if (!llama_params.contains(item.key()) || item.key() == "n_predict") {
             llama_params[item.key()] = item.value();

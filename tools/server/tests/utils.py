@@ -4,6 +4,7 @@
 # type: ignore[reportUnusedImport]
 
 import subprocess
+from pathlib import Path
 import os
 import threading
 
@@ -97,6 +98,7 @@ class ServerProcess:
     models_preset: str | None = None
     no_models_autoload: bool | None = None
     lora_files: List[str] | None = None
+    control_vector_files: List[str] | None = None
     enable_ctx_shift: int | None = False
     spec_type: str | None = None
     spec_draft_n_min: int | None = None
@@ -141,12 +143,22 @@ class ServerProcess:
         if self.external_server:
             print(f"[external_server]: Assuming external server running on {self.server_host}:{self.server_port}")
             return
+        configured_model = os.environ.get("LLAMA_TEST_MODEL")
+        if configured_model and Path(configured_model).is_file():
+            # An explicit local model is authoritative for reproducible native
+            # runs; do not silently fall back to the network/HF preset.
+            self.model_file = configured_model
+            self.model_hf_repo = None
+            self.model_hf_file = None
         if self.server_path is not None:
             server_path = self.server_path
         elif "LLAMA_SERVER_BIN_PATH" in os.environ:
             server_path = os.environ["LLAMA_SERVER_BIN_PATH"]
         elif os.name == "nt":
-            server_path = "../../../build/bin/Release/llama-server.exe"
+            # Resolve from this file, not from pytest's current working
+            # directory. The pinned CMake Ninja build emits build/bin/llama-server.exe
+            # (Release is a multi-config layout only for Visual Studio).
+            server_path = str(Path(__file__).resolve().parents[3] / "build" / "bin" / "llama-server.exe")
         else:
             server_path = "../../../build/bin/llama-server"
         server_args = [
@@ -234,6 +246,9 @@ class ServerProcess:
         if self.lora_files:
             for lora_file in self.lora_files:
                 server_args.extend(["--lora", lora_file])
+        if self.control_vector_files:
+            for cv_file in self.control_vector_files:
+                server_args.extend(["--control-vector", cv_file])
         if self.enable_ctx_shift:
             server_args.append("--context-shift")
         if self.spec_type:

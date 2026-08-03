@@ -51,6 +51,54 @@ def test_chat_completion(model, system_prompt, user_prompt, max_tokens, re_conte
     assert choice["finish_reason"] == finish_reason
 
 
+def test_nram_token_evidence_is_strictly_opt_in_and_uses_native_ids():
+    """Exercise the native parser and OpenAI SSE serializer end-to-end."""
+    global server
+    server.start()
+    base = {
+        "model": "tinyllama",
+        "max_tokens": 2,
+        "messages": [{"role": "user", "content": "Say hi"}],
+        "stream": True,
+    }
+    ordinary = list(server.make_stream_request("POST", "/chat/completions", data=base))
+    assert all("x_nram_token_evidence" not in event for event in ordinary)
+
+    controlled = list(server.make_stream_request("POST", "/chat/completions", data={
+        **base,
+        "x_nram_token_evidence": {"enabled": True, "return_tokens": True, "n_probs": 3},
+    }))
+    evidence_events = [event["x_nram_token_evidence"] for event in controlled if "x_nram_token_evidence" in event]
+    assert evidence_events
+    evidence = evidence_events[0]
+    assert evidence["schema"] == "llamacpp.token-evidence.v1"
+    assert evidence["logical_context"]["source"] == "llama.cpp_slot_state"
+    assert isinstance(evidence["tokens"][0]["token_id"], int)
+    assert len(evidence["tokens"][0]["candidates"]) <= 3
+    assert "logits" not in evidence["tokens"][0]
+
+
+def test_nram_token_evidence_rejects_unbounded_candidate_requests():
+    global server
+    server.start()
+    res = server.make_request("POST", "/chat/completions", data={
+        "messages": [{"role": "user", "content": "Say hi"}],
+        "x_nram_token_evidence": {"enabled": True, "return_tokens": True, "n_probs": 21},
+    })
+    assert res.status_code == 400
+
+
+@pytest.mark.parametrize("field,value", [("nram_token_evidence", True), ("nram_token_evidence_n_probs", 3)])
+def test_nram_internal_fields_cannot_bypass_public_namespace(field, value):
+    global server
+    server.start()
+    res = server.make_request("POST", "/chat/completions", data={
+        "messages": [{"role": "user", "content": "Say hi"}],
+        field: value,
+    })
+    assert res.status_code == 400
+
+
 def test_chat_completion_cached_tokens():
     global server
     server.n_slots = 1
