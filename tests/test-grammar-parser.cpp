@@ -139,6 +139,8 @@ static void verify_failure(const char * grammar_bytes) {
     assert(result.rules.empty() && "should have failed");
 }
 
+static void test_repetition_boundaries();
+
 int main()
 {
     verify_failure(R"""(
@@ -146,73 +148,8 @@ int main()
     )""");
 
     verify_failure(R"""(
-        root ::= (((((([^x]*){0,99}){0,99}){0,99}){0,99}){0,99}){0,99}
-    )""");
-
-    verify_failure(R"""(
         root ::= "a"{,10}"
     )""");
-
-    verify_failure(R"""(
-        root ::= "a"{5000}
-    )""");
-
-    verify_failure(R"""(
-        root ::= "a"{5000,}
-    )""");
-
-    verify_failure(R"""(
-        root ::= "a"{5000,6000}
-    )""");
-
-    // Recursion depth limit exceeded (Issue #29495)
-    {
-        std::string deep_grammar = "root ::= ";
-        int n_depth = 300;
-        for (int i = 0; i < n_depth; ++i) {
-            deep_grammar += "(";
-        }
-        deep_grammar += "\"x\"";
-        for (int i = 0; i < n_depth; ++i) {
-            deep_grammar += ")";
-        }
-        verify_failure(deep_grammar.c_str());
-    }
-
-    verify_parsing(R"""(
-        root ::= "a"{0,5000}
-    )""", {
-        {"root", 0},
-        {"root_1", 1},
-    }, {
-        // root (index 0)
-        {LLAMA_GRETYPE_RULE_REF, /* root_1 */ 1},
-        {LLAMA_GRETYPE_END, 0},
-        // root_1 (index 1)
-        {LLAMA_GRETYPE_CHAR, 'a'},
-        {LLAMA_GRETYPE_RULE_REF, /* root_1 */ 1},
-        {LLAMA_GRETYPE_ALT, 0},
-        {LLAMA_GRETYPE_END, 0},
-    });
-
-    verify_parsing(R"""(
-        root ::= "a"{3,5000}
-    )""", {
-        {"root", 0},
-        {"root_1", 1},
-    }, {
-        // root (index 0)
-        {LLAMA_GRETYPE_CHAR, 'a'},
-        {LLAMA_GRETYPE_CHAR, 'a'},
-        {LLAMA_GRETYPE_CHAR, 'a'},
-        {LLAMA_GRETYPE_RULE_REF, /* root_1 */ 1},
-        {LLAMA_GRETYPE_END, 0},
-        // root_1 (index 1)
-        {LLAMA_GRETYPE_CHAR, 'a'},
-        {LLAMA_GRETYPE_RULE_REF, /* root_1 */ 1},
-        {LLAMA_GRETYPE_ALT, 0},
-        {LLAMA_GRETYPE_END, 0},
-    });
 
     verify_parsing(R"""(
         root  ::= "a"
@@ -594,5 +531,150 @@ int main()
         {LLAMA_GRETYPE_END, 0},
     });
 
+    test_repetition_boundaries();
+
     return 0;
+}
+
+// ----------------------------------------------------------------------------
+// Focused regression matrix for bounded repetition. Large bounded counts must
+// construct with O(log n) synthesized rules and must never widen the upper
+// bound. These assertions fail on current master for the 1999/2000/2001
+// boundary cases, exact counts above 2000, large minimums and grouped subrules.
+// ----------------------------------------------------------------------------
+
+struct repetition_expectation {
+    const char * grammar;
+    bool         expect_ok;
+    uint64_t     max_rules;
+    uint64_t     max_char_elements;
+    bool         expect_no_self_ref; // bounded max must not synthesize a self-recursive rule
+};
+
+static bool g_repetition_failed = false;
+
+static void verify_repetition(const repetition_expectation & tc) {
+    llama_grammar_parser parsed;
+    parsed.parse(tc.grammar);
+
+    const bool ok = !parsed.rules.empty();
+    if (ok != tc.expect_ok) {
+        fprintf(stderr, "FAIL repetition [%s]: expected ok=%d got ok=%d rules=%zu\n",
+                tc.grammar, tc.expect_ok ? 1 : 0, ok ? 1 : 0, parsed.rules.size());
+        g_repetition_failed = true;
+    }
+    if (!ok) {
+        return;
+    }
+
+    uint64_t n_chars = 0;
+    bool self_ref = false;
+    for (size_t i = 0; i < parsed.rules.size(); i++) {
+        for (const auto & el : parsed.rules[i]) {
+            switch (el.type) {
+                case LLAMA_GRETYPE_CHAR:
+                case LLAMA_GRETYPE_CHAR_ALT:
+                case LLAMA_GRETYPE_CHAR_NOT:
+                case LLAMA_GRETYPE_CHAR_RNG_UPPER:
+                    n_chars++;
+                    break;
+                case LLAMA_GRETYPE_RULE_REF:
+                    if (el.value == i) {
+                        self_ref = true;
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    if (parsed.rules.size() > tc.max_rules) {
+        fprintf(stderr, "FAIL repetition [%s]: %zu rules exceed max %llu\n",
+                tc.grammar, parsed.rules.size(), (unsigned long long) tc.max_rules);
+        g_repetition_failed = true;
+    }
+    if (n_chars > tc.max_char_elements) {
+        fprintf(stderr, "FAIL repetition [%s]: %llu char elements exceed max %llu\n",
+                tc.grammar, (unsigned long long) n_chars, (unsigned long long) tc.max_char_elements);
+        g_repetition_failed = true;
+    }
+    if (tc.expect_no_self_ref && self_ref) {
+        fprintf(stderr, "FAIL repetition [%s]: bounded repetition synthesized a self-recursive rule (bound widened)\n", tc.grammar);
+        g_repetition_failed = true;
+    }
+}
+
+static void test_repetition_boundaries() {
+    // {0,n} and {1,n} around the old 2000 cap: construct compactly, stay bounded.
+    verify_repetition({ R"""(
+        root ::= "a"{0,1999}
+    )""", true, 48, 32, true });
+    verify_repetition({ R"""(
+        root ::= "a"{0,2000}
+    )""", true, 48, 32, true });
+    verify_repetition({ R"""(
+        root ::= "a"{0,2001}
+    )""", true, 48, 32, true });
+    verify_repetition({ R"""(
+        root ::= "a"{1,1999}
+    )""", true, 48, 32, true });
+    verify_repetition({ R"""(
+        root ::= "a"{1,2000}
+    )""", true, 48, 32, true });
+    verify_repetition({ R"""(
+        root ::= "a"{1,2001}
+    )""", true, 48, 32, true });
+
+    // Exact counts around the cap.
+    verify_repetition({ R"""(
+        root ::= "a"{1999}
+    )""", true, 48, 32, true });
+    verify_repetition({ R"""(
+        root ::= "a"{2000}
+    )""", true, 48, 32, true });
+    verify_repetition({ R"""(
+        root ::= "a"{2001}
+    )""", true, 48, 32, true });
+    verify_repetition({ R"""(
+        root ::= "a"{5000}
+    )""", true, 64, 32, true });
+
+    // Unbounded max with a large minimum must construct.
+    verify_repetition({ R"""(
+        root ::= "a"{5000,}
+    )""", true, 64, 32, false });
+    verify_repetition({ R"""(
+        root ::= "a"{5000,6000}
+    )""", true, 64, 32, true });
+
+    // Grouped subrules: the repeated item is a synthesized alternation rule.
+    verify_repetition({ R"""(
+        root ::= ("a" | "b"){0,1500}
+    )""", true, 64, 32, true });
+    verify_repetition({ R"""(
+        root ::= ("ab" | "cd" | "ef"){0,1000}
+    )""", true, 64, 32, true });
+
+    // Deeply nested bounded repetitions must construct compactly.
+    verify_repetition({ R"""(
+        root ::= (((((([^x]*){0,99}){0,99}){0,99}){0,99}){0,99}){0,99}
+    )""", true, 256, 64, false });
+
+    // Recursion depth limit exceeded (Issue #29495): deep parenthesis nesting must be
+    // rejected by GRAMMAR_RECURSIVE_LIMIT rather than overflowing.
+    {
+        std::string deep_grammar = "root ::= ";
+        int n_depth = 300;
+        for (int i = 0; i < n_depth; ++i) {
+            deep_grammar += "(";
+        }
+        deep_grammar += "\"x\"";
+        for (int i = 0; i < n_depth; ++i) {
+            deep_grammar += ")";
+        }
+        verify_repetition({ deep_grammar.c_str(), false, 0, 0, true });
+    }
+
+    assert(!g_repetition_failed && "bounded repetition regression matrix failed");
 }

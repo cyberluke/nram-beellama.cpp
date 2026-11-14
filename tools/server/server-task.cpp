@@ -1647,6 +1647,26 @@ std::string server_task_result_metrics::to_metrics() {
             "Speculative: Total speculative decoding verification steps",
             (double) metrics.n_draft_verif_steps
         }, {
+            "mtmd_media_budget_adapt_total",
+            "Number of media blocks adapted to fit a runtime token budget",
+            (double) metrics.mtmd_media_budget_adapt_total
+        }, {
+            "mtmd_media_budget_reject_total",
+            "Number of media blocks rejected by the media token budget",
+            (double) metrics.mtmd_media_budget_reject_total
+        }, {
+            "mtmd_atomic_capacity_violation_total",
+            "Number of ATOMIC media blocks exceeding the decoder runtime capacity",
+            (double) metrics.mtmd_atomic_capacity_violation_total
+        }, {
+            "mtmd_dynamic_resize_total",
+            "Number of DYNAMIC_RESIZE budget adaptations",
+            (double) metrics.mtmd_dynamic_resize_total
+        }, {
+            "mtmd_dynamic_tiling_total",
+            "Number of DYNAMIC_TILING budget adaptations",
+            (double) metrics.mtmd_dynamic_tiling_total
+        }, {
             "prompt_cache_admission_attempts_total",
             "Total immutable RAM prompt-cache admission attempts",
             (double) metrics.prompt_cache_admission_attempts

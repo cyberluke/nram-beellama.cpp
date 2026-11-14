@@ -870,7 +870,7 @@ impl ServerProcess {
         final_args.push("--model".into());
         final_args.push(model_path.into());
         final_args.push("--host".into());
-        final_args.push("127.0.0.1".into());
+        final_args.push("0.0.0.0".into());
         final_args.push("--port".into());
         final_args.push(port.to_string());
         let mut i = 0;
@@ -974,14 +974,48 @@ impl ServerProcess {
             }
         });
 
-        // reaper: wait for child exit, notify UI, clear slot
+        // reaper: watch for child exit, notify UI, clear the shared slot.
+        //
+        // CRITICAL: never hold the child mutex while blocked in `wait()`. The
+        // old reaper took the child and then called `c.wait()` INSIDE the
+        // `if let` body — the MutexGuard from `lock()` lives for the whole
+        // if-let statement, so the guard stayed held until llama-server exited.
+        // Meanwhile ServerProcess::drop (runs on the UI thread for Esc/Back/
+        // NewModel/Quit) does `self.child.lock()` and blocked on that same
+        // mutex, so the kill could never run: the UI froze with the last frame
+        // on screen, the hovered button stuck, and every key dead. The reaper
+        // now polls `try_wait()` under a short-lived lock and also honors
+        // `request_stop` (set by Drop) so a deliberate stop kills the child
+        // without the UI thread ever waiting on the process.
         let tc = tx.clone();
         let child_shared2 = child_shared.clone();
+        let stop = request_stop.clone();
         thread::spawn(move || {
-            if let Some(mut c) = child_shared2.lock().unwrap().take() {
-                let status = c.wait();
-                let code = status.map(|s| s.code().unwrap_or(0) as u32).unwrap_or(u32::MAX);
-                let _ = tc.send(ServerEvent::Exit(code));
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    // App requested stop (Drop set the flag). Kill what is
+                    // left, then leave — no Exit event: the UI already knows.
+                    if let Some(mut c) = child_shared2.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                        let _ = c.kill();
+                    }
+                    break;
+                }
+                // Short-lived lock: only poll exit status, never block.
+                let exited = child_shared2
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .as_mut()
+                    .map(|c| c.try_wait().ok().flatten().is_some())
+                    .unwrap_or(true);
+                if exited {
+                    // Child already gone (or handle vanished). Reap + notify.
+                    if let Some(mut c) = child_shared2.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                        let code = c.wait().map(|s| s.code().unwrap_or(0) as u32).unwrap_or(u32::MAX);
+                        let _ = tc.send(ServerEvent::Exit(code));
+                    }
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
             }
         });
 
@@ -1004,8 +1038,11 @@ impl ServerProcess {
 
 impl Drop for ServerProcess {
     fn drop(&mut self) {
+        // Never block here: this runs on the UI thread (Esc / Back / quit).
+        // The reaper owns all waiting; we just flag + kill if the slot is
+        // still ours. Poison-safe: a panicked reaper must not wedge the exit.
         self.request_stop.store(true, Ordering::Relaxed);
-        if let Some(mut c) = self.child.lock().unwrap().take() {
+        if let Some(mut c) = self.child.lock().unwrap_or_else(|p| p.into_inner()).take() {
             let _ = c.kill();
         }
     }

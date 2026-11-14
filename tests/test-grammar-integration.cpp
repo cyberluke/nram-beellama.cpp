@@ -1509,6 +1509,8 @@ static void test_json_schema() {
     );
 }
 
+static void test_repetition_boundaries();
+
 int main() {
     fprintf(stdout, "Running grammar integration tests...\n");
     test_simple_grammar();
@@ -1521,6 +1523,99 @@ int main() {
     test_failure_missing_root_symbol();
     test_custom_root_symbol_check();
     test_json_schema();
+    test_repetition_boundaries();
     fprintf(stdout, "All tests passed.\n");
     return 0;
 }
+
+// ----------------------------------------------------------------------------
+// Bounded repetition semantics around the old MAX_REPETITION_THRESHOLD = 2000.
+// Finite bounds above 2000 must be preserved exactly. On current master the
+// upper bound is silently widened to unbounded, so the failing strings below
+// incorrectly match; these assertions fail there.
+// ----------------------------------------------------------------------------
+
+static void test_grammar_must_build(const std::string & desc, const std::string & grammar_str,
+                                    const std::vector<std::string> & passing, const std::vector<std::string> & failing) {
+    llama_grammar * g = build_grammar(grammar_str);
+    if (g == nullptr) {
+        fprintf(stderr, "❌ %s: grammar construction failed\n", desc.c_str());
+        assert(g != nullptr && "grammar construction must succeed");
+    }
+    llama_grammar_free_impl(g);
+    test_grammar(desc, grammar_str, passing, failing);
+}
+
+static void test_repetition_boundaries() {
+    test_grammar_must_build("bounded {0,2001}",
+        "root ::= \"a\"{0,2001}",
+        { "", std::string(2001, 'a') },
+        { std::string(2002, 'a') });
+
+    test_grammar_must_build("exact {2001}",
+        "root ::= \"a\"{2001}",
+        { std::string(2001, 'a') },
+        { std::string(2000, 'a'), std::string(2002, 'a') });
+
+    test_grammar_must_build("bounded {5000,6000}",
+        "root ::= \"a\"{5000,6000}",
+        { std::string(5000, 'a'), std::string(6000, 'a') },
+        { std::string(4999, 'a'), std::string(6001, 'a') });
+
+    test_grammar_must_build("grouped {0,1500}",
+        "root ::= (\"a\" | \"b\"){0,1500}",
+        { std::string(1500, 'a') },
+        { std::string(1501, 'a') });
+
+    test_grammar_must_build("rule-ref {0,1999}",
+        "root ::= char{0,1999}\nchar ::= [^\"\\\\] | \"b\"",
+        { std::string(1999, 'a') },
+        { std::string(2000, 'a') });
+
+    test_schema("maxLength 1999",
+        R"({"type":"string","maxLength":1999})",
+        { "\"" + std::string(1999, 'a') + "\"" },
+        { "\"" + std::string(2000, 'a') + "\"" });
+
+    test_schema("maxLength 2000",
+        R"({"type":"string","maxLength":2000})",
+        { "\"" + std::string(2000, 'a') + "\"" },
+        { "\"" + std::string(2001, 'a') + "\"" });
+
+    // maxLength > 2000 currently loses its upper bound: 2002 chars match.
+    test_schema("maxLength 2001",
+        R"({"type":"string","maxLength":2001})",
+        { "\"" + std::string(2001, 'a') + "\"" },
+        { "\"" + std::string(2002, 'a') + "\"" });
+
+    test_schema("maxLength 4096",
+        R"({"type":"string","maxLength":4096})",
+        { "\"" + std::string(4096, 'a') + "\"" },
+        { "\"" + std::string(4097, 'a') + "\"" });
+
+    // minLength > 2000 currently fails grammar construction.
+    {
+        std::string grammar_str = json_schema_to_grammar(json::parse(R"({"type":"string","minLength":2001,"maxLength":4096})"), true);
+        test_grammar_must_build("minLength 2001 maxLength 4096", grammar_str,
+            { "\"" + std::string(2001, 'a') + "\"", "\"" + std::string(3000, 'a') + "\"", "\"" + std::string(4096, 'a') + "\"" },
+            { "\"" + std::string(2000, 'a') + "\"", "\"" + std::string(4097, 'a') + "\"" });
+    }
+
+    // maxItems > 2000 currently loses its upper bound.
+    {
+        auto arr = [](int n) {
+            std::string s = "[";
+            for (int i = 0; i < n; i++) {
+                if (i) { s += ","; }
+                s += "\"a\"";
+            }
+            s += "]";
+            return s;
+        };
+        test_schema("maxItems 2001",
+            R"({"type":"array","items":{"type":"string"},"maxItems":2001})",
+            { arr(2001) },
+            { arr(2002) });
+    }
+}
+

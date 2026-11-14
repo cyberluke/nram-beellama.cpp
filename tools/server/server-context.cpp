@@ -1253,6 +1253,15 @@ public:
             result.prompt_cache_restore_failures    = prompt_cache->restore_failures;
             result.prompt_cache_accounted_bytes     = prompt_cache->accounted_size();
         }
+        if (mctx) {
+            // mirror the mtmd media budget counters into the server metrics
+            const auto c = mtmd_get_counters(mctx);
+            result.mtmd_media_budget_adapt_total        = c.media_budget_adapt_total;
+            result.mtmd_media_budget_reject_total       = c.media_budget_reject_total;
+            result.mtmd_atomic_capacity_violation_total = c.atomic_capacity_violation_total;
+            result.mtmd_dynamic_resize_total            = c.dynamic_resize_total;
+            result.mtmd_dynamic_tiling_total            = c.dynamic_tiling_total;
+        }
         return result;
     }
 
@@ -1572,7 +1581,7 @@ private:
                 mtmd_helper_log_set(common_log_default_callback, nullptr);
             }
 
-            // the image must fit in one ubatch if the model needs non-causal attention on it
+// the image must fit in one ubatch if the model needs non-causal attention on it
             // a non-causal model also has the text of the prompt in that ubatch, leave half of it to the text
             {
                 const int n_ubatch = llama_n_ubatch(ctx_tgt);
@@ -1588,6 +1597,14 @@ private:
                     }
                 }
             }
+
+            // the atomic media capacity is derived from the actual initialized target
+            // context, which may differ from the CLI defaults (memory fitting, backend
+            // constraints, runtime configuration). this is a correctness limit for
+            // ATOMIC (non-causal) media blocks, not the MTMD encoder batch size
+            mparams.decode_constraints.max_atomic_tokens = (int32_t) std::min(
+                llama_n_batch(ctx_tgt),
+                llama_n_ubatch(ctx_tgt));
 
             mctx = mtmd_init_from_file(mmproj_path.c_str(), model_tgt, mparams);
             if (mctx == nullptr) {

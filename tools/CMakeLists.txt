@@ -46,4 +46,8 @@ else()
         add_subdirectory(tuning)
     endif()
     add_subdirectory(results)
+    if (NOT EMSCRIPTEN)
+        # llama-lab Rust TUI — bundles llama-lab.exe next to llama-server.exe.
+        add_subdirectory(llama-lab-rust)
+    endif()
 endif()

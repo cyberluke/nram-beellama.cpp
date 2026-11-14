@@ -644,7 +644,7 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_help(f: &mut Frame, app: &App) {
     let w = (f.area().width / 3).clamp(40, 64);
-    let h = 16u16;
+    let h = 19u16.min(f.area().height);
     let x = f.area().x + (f.area().width - w) / 2;
     let y = f.area().y + (f.area().height - h) / 2;
     let area = Rect::new(x, y, w, h);
@@ -659,8 +659,10 @@ fn render_help(f: &mut Frame, app: &App) {
         Line::from(Span::styled(format!("  Ctrl + t    {}", app.t("help_theme")), muted())),
         Line::from(Span::styled(format!("  Ctrl + ?    {}", app.t("help_this")), muted())),
         Line::from(Span::styled(format!("  Ctrl + Q    {}", app.t("help_quit")), muted())),
-        Line::from(Span::styled(format!("  Esc         {}", app.t("help_back")), muted())),
+        Line::from(Span::styled(format!("  Esc         {}", app.t("help_esc")), muted())),
         Line::from(Span::styled(format!("  Ctrl + n    {}", app.t("help_new")), muted())),
+        Line::from(Span::styled(format!("  F1–F5       {}", app.t("help_fn")), muted())),
+        Line::from(Span::styled(format!("  Alt         {}", app.t("help_alt")), muted())),
         Line::from(""),
         Line::from(Span::styled(format!("  {}", app.t("help_commands")), Style::default().fg(ACCENT))),
     ];

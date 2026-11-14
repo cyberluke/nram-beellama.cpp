@@ -181,10 +181,10 @@ if (LLAMA_LLGUIDANCE)
     set_target_properties(llguidance PROPERTIES IMPORTED_LOCATION ${LLGUIDANCE_PATH}/${LLGUIDANCE_LIB_NAME})
     add_dependencies(llguidance llguidance_ext)
 
-    target_include_directories(${TARGET} PRIVATE ${LLGUIDANCE_PATH})
+    target_include_directories(${TARGET} PRIVATE ${LLGUIDANCE_PATH} ${LLGUIDANCE_SRC}/parser)
     target_link_libraries(${TARGET} PRIVATE llguidance)
     if (WIN32)
-        target_link_libraries(${TARGET} PRIVATE ws2_32 userenv ntdll bcrypt)
+        target_link_libraries(${TARGET} PRIVATE ws2_32 userenv ntdll bcrypt synchronization)
     endif()
 endif()
 

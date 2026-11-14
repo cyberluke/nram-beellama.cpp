@@ -114,6 +114,11 @@ pub struct App {
     /// Rect + action for each clickable chat button, set by the renderer each
     /// frame so the event loop can hit-test clicks against them.
     pub chat_buttons: Vec<(ratatui::layout::Rect, ChatAction)>,
+    /// Graceful quit flag: set by shortcuts / buttons / commands; the event
+    /// loop breaks and main() restores the terminal (raw mode, mouse capture,
+    /// keyboard enhancement flags). Never std::process::exit — that left the
+    /// host terminal wedged in raw mode and the tab's input dead.
+    pub should_quit: bool,
 }
 
 /// Click target rendered in the chat button bar.
@@ -180,6 +185,7 @@ impl App {
             handle_delta_rx: None,
             mouse_pos: None,
             chat_buttons: Vec::new(),
+            should_quit: false,
         };
         if let Some(p) = model_path {
             app.model_path = p;
@@ -493,7 +499,7 @@ impl App {
                 self.messages.clear();
                 self.server_log.clear();
             }
-            "/quit" | "/exit" => std::process::exit(0),
+            "/quit" | "/exit" => self.should_quit = true,
             "/theme" => self.theme_inverted = !self.theme_inverted,
             "/autoscroll" => {
                 self.auto_scroll = !self.auto_scroll;
@@ -600,74 +606,70 @@ let autopick = std::env::var("LLAMA_TUI_AUTOPICK").is_ok();
 }
 
 fn run(terminal: &mut DefaultTerminal, app: &mut App) -> anyhow::Result<()> {
+    // One dedicated reader thread owns crossterm's blocking event::read() and
+    // feeds a channel; the main loop drains EVERYTHING available each frame.
+    //
+    // Why not the classic poll()+read() on the main thread? On Windows this
+    // pair is a known hang source (a poll that reports true and a read that
+    // then blocks forever, e.g. when an SGR/kitty enhancement sequence is
+    // split across console records), and handling exactly one event per
+    // 100 ms iteration lets the queue back up while the mouse is moving
+    // (hover generates a steady stream) — the UI then appears frozen with
+    // the last frame stuck on screen: sticky hover, hotkeys dead, typing
+    // dead. Drain-all + a non-blocking channel removes the whole class.
+    let (tx, rx) = std::sync::mpsc::channel::<Event>();
+    // Resilient reader: poll with a timeout so a transient read error can
+    // never kill the whole input path. The old `while let Ok(ev) = read()`
+    // loop ended the thread on the first Err, leaving a frozen frame, stuck
+    // hover and dead keys for the rest of the session.
+    std::thread::spawn(move || loop {
+        match event::poll(std::time::Duration::from_millis(40)) {
+            Ok(true) => match event::read() {
+                Ok(ev) => {
+                    if tx.send(ev).is_err() {
+                        break; // app quit; stop reading
+                    }
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            },
+            Ok(false) => {}
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(25)),
+        }
+    });
+
     loop {
-        poll_and_handle(app)?;
+        // Timer-driven work (splash animation, streaming deltas, server log).
+        tick(app);
+        // Drain all pending events so input can never fall behind.
+        while let Ok(ev) = rx.try_recv() {
+            handle_event(app, ev)?;
+            if app.should_quit {
+                break;
+            }
+        }
+        if app.should_quit {
+            break;
+        }
         terminal.draw(|f| ui::render(f, app))?;
+        // ~60 fps draw budget; keeps the llama animation smooth without
+        // spinning the CPU.
+        std::thread::sleep(std::time::Duration::from_millis(16));
     }
     // Drop app (kills server via ServerProcess::drop) happens on process exit.
+    Ok(())
 }
 
-fn poll_and_handle(app: &mut App) -> anyhow::Result<()> {
+/// Timer-driven work that must advance even when no input arrives.
+fn tick(app: &mut App) {
     // Splash / launch animations advance on a timer regardless of input.
     if matches!(app.stage, Stage::Welcome | Stage::Optimize) {
         app.splash_frame += 1;
     }
-    if event::poll(std::time::Duration::from_millis(100))? {
-        match event::read()? {
-            Event::Key(key) => {
-                if key.kind == KeyEventKind::Release {
-                    return Ok(());
-                }
-                handle_key(app, key)?;
-            }
-            // Mouse: track position for hover, and on a Left click hit-test the chat
-            // buttons rendered last frame (mouse capture is ON, so clicks come
-            // to us instead of stealing focus).
-            Event::Mouse(m) => {
-                use ratatui::crossterm::event::MouseEventKind;
-                use ratatui::crossterm::event::MouseButton;
-                app.mouse_pos = Some((m.column, m.row));
-                match m.kind {
-                    MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => {
-                        // Fire on Up so the drag-select between down/up is safe.
-                        if matches!(m.kind, MouseEventKind::Up(_)) {
-                            let pt = (m.column, m.row);
-                            if let Some((_, action)) = app
-                                .chat_buttons
-                                .iter()
-                                .find(|(r, _)| pt.0 >= r.x && pt.0 < r.x + r.width && pt.1 >= r.y && pt.1 < r.y + r.height)
-                            {
-                                match *action {
-                                    ChatAction::NewModel => { stop_server(app); app.stage = Stage::ModelSelect; }
-                                    ChatAction::Theme => app.theme_inverted = !app.theme_inverted,
-                                    ChatAction::Autoscroll => { app.log_autoscroll = true; app.log_scroll = 0; }
-                                    ChatAction::Help => app.show_help = true,
-                                    ChatAction::Back => {
-                                        stop_server(app);
-                                        app.stage = Stage::ModelSelect;
-                                        textarea_set(&mut app.input, "");
-                                        app.history_index = None;
-                                    }
-                                    ChatAction::Quit => std::process::exit(0),
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            // Focus / paste / resize: consumed and ignored. Must still be read
-            // or the terminal queue backs up and raw mode wedges.
-            Event::FocusGained
-            | Event::FocusLost
-            | Event::Paste(_)
-            | Event::Resize(_, _) => {}
-        }
-    }
+
     // Drain streaming assistant deltas (from the chat background thread).
     if let Some((idx, rx)) = app.handle_delta_rx.take() {
         let mut finished = false;
-while let Ok(tok) = rx.try_recv() {
+        while let Ok(tok) = rx.try_recv() {
             if tok == "\u{0}DONE" {
                 finished = true;
             } else if let Some(m) = app.messages.get_mut(idx) {
@@ -680,7 +682,7 @@ while let Ok(tok) = rx.try_recv() {
         }
         if !finished {
             app.handle_delta_rx = Some((idx, rx));
-} else {
+        } else {
             app.status = "ready".into();
             // Speed = REAL SSE token count / decode-only time (excludes the
             // prompt-eval/prefill phase, which used to drag tok/s to "5.9").
@@ -701,7 +703,7 @@ while let Ok(tok) = rx.try_recv() {
                         app.server_log.drain(0..(app.server_log.len() - 2000));
                     }
                 }
-ServerEvent::Healthy(ok) => {
+                ServerEvent::Healthy(ok) => {
                     if ok {
                         app.status = "ready".into();
                         if matches!(app.stage, Stage::Optimize) {
@@ -709,13 +711,71 @@ ServerEvent::Healthy(ok) => {
                         }
                     }
                 }
-ServerEvent::Exit(code) => {
+                ServerEvent::Exit(code) => {
                     app.status = format!("{} {})", app.i18n.t("server_exited"), code);
                 }
             }
         }
     }
+}
+
+/// Handle one input event from the reader thread.
+fn handle_event(app: &mut App, event: Event) -> anyhow::Result<()> {
+    match event {
+        Event::Key(key) => {
+            if key.kind == KeyEventKind::Release {
+                return Ok(());
+            }
+            handle_key(app, key)?;
+        }
+        // Mouse: track position for hover, and on a Left PRESS hit-test the
+        // chat buttons rendered last frame (mouse capture is ON, so clicks
+        // come to us instead of stealing focus). Firing on Down (not Up) is
+        // the robust choice: some Windows hosts eat the Up when the release
+        // happens after a drag or outside the terminal, which is exactly the
+        // "click does nothing but the button stays hovered" symptom.
+        Event::Mouse(m) => {
+            use ratatui::crossterm::event::MouseButton;
+            use ratatui::crossterm::event::MouseEventKind;
+            app.mouse_pos = Some((m.column, m.row));
+            if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let pt = (m.column, m.row);
+                if let Some((_, action)) = app.chat_buttons.iter().find(|(r, _)| {
+                    pt.0 >= r.x && pt.0 < r.x + r.width && pt.1 >= r.y && pt.1 < r.y + r.height
+                }) {
+                    run_chat_action(app, *action);
+                }
+            }
+        }
+        // Focus / paste / resize: consumed and ignored. Must still be read
+        // or the terminal queue backs up and raw mode wedges.
+        Event::FocusGained | Event::FocusLost | Event::Paste(_) | Event::Resize(_, _) => {}
+    }
     Ok(())
+}
+
+/// Execute a chat button-bar action. Single canonical path shared by the
+/// mouse buttons, the Ctrl shortcuts and the F1–F5 fallbacks.
+fn run_chat_action(app: &mut App, action: ChatAction) {
+    match action {
+        ChatAction::NewModel => {
+            stop_server(app);
+            app.stage = Stage::ModelSelect;
+        }
+        ChatAction::Theme => app.theme_inverted = !app.theme_inverted,
+        ChatAction::Autoscroll => {
+            app.log_autoscroll = true;
+            app.log_scroll = 0;
+        }
+        ChatAction::Help => app.show_help = true,
+        ChatAction::Back => {
+            stop_server(app);
+            app.stage = Stage::ModelSelect;
+            textarea_set(&mut app.input, "");
+            app.history_index = None;
+        }
+        ChatAction::Quit => app.should_quit = true,
+    }
 }
 
 fn handle_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) -> anyhow::Result<()> {
@@ -730,9 +790,13 @@ fn handle_key(app: &mut App, key: ratatui::crossterm::event::KeyEvent) -> anyhow
         _ => None,
     };
 
-    // Global quit: Ctrl+Q (either delivery).
+    // Global quit: Ctrl+Q (either delivery). Graceful — the terminal (raw
+    // mode, mouse capture, kitty flags) is restored in main() after run()
+    // returns; a hard process::exit left the host terminal wedged and the
+    // tab's input dead.
     if ctrl_key == Some('q') {
-        std::process::exit(0);
+        app.should_quit = true;
+        return Ok(());
     }
 match app.stage {
         Stage::Welcome => {
@@ -740,7 +804,7 @@ match app.stage {
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     app.stage = if app.autopick { Stage::Chat } else { Stage::Language };
                 }
-                KeyCode::Esc => std::process::exit(0),
+                KeyCode::Esc => app.should_quit = true,
                 _ => {}
             }
         }
@@ -906,13 +970,13 @@ Stage::Chat => {
             // are handled after, so Enter can never collide again.
             if mod_ctrl {
                 match key.code {
-                    KeyCode::Char('t' | 'T') => { app.theme_inverted = !app.theme_inverted; return Ok(()); }
-                    KeyCode::Char('a' | 'A') => { app.log_autoscroll = true; app.log_scroll = 0; return Ok(()); }
-                    KeyCode::Char('n' | 'N') => { stop_server(app); app.stage = Stage::ModelSelect; return Ok(()); }
-                    KeyCode::Char('q' | 'Q') => std::process::exit(0),
+                    KeyCode::Char('t' | 'T') => { run_chat_action(app, ChatAction::Theme); return Ok(()); }
+                    KeyCode::Char('a' | 'A') => { run_chat_action(app, ChatAction::Autoscroll); return Ok(()); }
+                    KeyCode::Char('n' | 'N') => { run_chat_action(app, ChatAction::NewModel); return Ok(()); }
+                    KeyCode::Char('q' | 'Q') => { app.should_quit = true; return Ok(()); }
                     KeyCode::Char('=' | '+') => { app.chat_ratio = (app.chat_ratio + 0.05).min(0.95); return Ok(()); }
                     KeyCode::Char('-' | '_') => { app.chat_ratio = (app.chat_ratio - 0.05).max(0.20); app.log_autoscroll = false; return Ok(()); }
-                    KeyCode::Char('?') => { app.show_help = true; return Ok(()); }
+                    KeyCode::Char('?' | '/') => { run_chat_action(app, ChatAction::Help); return Ok(()); }
                     _ => {}
                 }
             }
@@ -929,10 +993,39 @@ Stage::Chat => {
             };
             if let Some(k) = ctrl_byte {
                 match k {
-                    'a' => { app.log_autoscroll = true; app.log_scroll = 0; return Ok(()); }
-                    'n' => { stop_server(app); app.stage = Stage::ModelSelect; return Ok(()); }
-                    'q' => std::process::exit(0),
-                    't' => { app.theme_inverted = !app.theme_inverted; return Ok(()); }
+                    'a' => { run_chat_action(app, ChatAction::Autoscroll); return Ok(()); }
+                    'n' => { run_chat_action(app, ChatAction::NewModel); return Ok(()); }
+                    'q' => { app.should_quit = true; return Ok(()); }
+                    't' => { run_chat_action(app, ChatAction::Theme); return Ok(()); }
+                    _ => {}
+                }
+            }
+            // F1–F5 mirror the button bar for hosts that reserve the Ctrl
+            // combos (Windows Terminal defaults: Ctrl+T = new tab,
+            // Ctrl+= / Ctrl+- = font zoom), so every chat shortcut works
+            // without rebinding the terminal.
+            match key.code {
+                KeyCode::F(1) => { run_chat_action(app, ChatAction::Help); return Ok(()); }
+                KeyCode::F(2) => { run_chat_action(app, ChatAction::Theme); return Ok(()); }
+                KeyCode::F(3) => { run_chat_action(app, ChatAction::Autoscroll); return Ok(()); }
+                KeyCode::F(4) => { run_chat_action(app, ChatAction::NewModel); return Ok(()); }
+                KeyCode::F(5) => { run_chat_action(app, ChatAction::Back); return Ok(()); }
+                _ => {}
+            }
+            // Alt+letter shortcuts: the Ctrl combos are reserved by Windows
+            // Terminal itself (Ctrl+T new tab, Ctrl+N new window, Ctrl+=/- font
+            // zoom — they never reach the app), and F-keys are unreliable on
+            // laptops. Alt combos pass through every terminal unbound.
+            if key.modifiers.contains(KeyModifiers::ALT) {
+                match key.code {
+                    KeyCode::Char('t' | 'T') => { run_chat_action(app, ChatAction::Theme); return Ok(()); }
+                    KeyCode::Char('a' | 'A') => { run_chat_action(app, ChatAction::Autoscroll); return Ok(()); }
+                    KeyCode::Char('n' | 'N') => { run_chat_action(app, ChatAction::NewModel); return Ok(()); }
+                    KeyCode::Char('h' | 'H') => { run_chat_action(app, ChatAction::Help); return Ok(()); }
+                    KeyCode::Char('b' | 'B') => { run_chat_action(app, ChatAction::Back); return Ok(()); }
+                    KeyCode::Char('q' | 'Q') => { app.should_quit = true; return Ok(()); }
+                    KeyCode::Char('=' | '+') => { app.chat_ratio = (app.chat_ratio + 0.05).min(0.95); return Ok(()); }
+                    KeyCode::Char('-' | '_') => { app.chat_ratio = (app.chat_ratio - 0.05).max(0.20); app.log_autoscroll = false; return Ok(()); }
                     _ => {}
                 }
             }
@@ -940,9 +1033,10 @@ Stage::Chat => {
             if matches!(key.code, KeyCode::Esc | KeyCode::Char('\u{1b}')) {
                 if app.show_help {
                     app.show_help = false;
-                } else {
-                    stop_server(app);
-                    app.stage = Stage::ModelSelect;
+                } else if !app.input.is_empty() {
+                    // Clear the draft. Esc must NEVER leave the chat — it used
+                    // to stop the server and dump the user back at the model
+                    // picker, which read as "chat stopped working".
                     textarea_set(&mut app.input, "");
                     app.history_index = None;
                 }
