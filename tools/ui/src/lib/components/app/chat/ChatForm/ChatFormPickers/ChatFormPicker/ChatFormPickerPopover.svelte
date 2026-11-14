@@ -4,8 +4,6 @@
 
 	interface Props {
 		class?: string;
-		/** What the popover floats by, instead of the box its trigger fills. */
-		customAnchor?: HTMLElement | null;
 		isOpen?: boolean;
 		srLabel?: string;
 		onClose?: () => void;
@@ -16,7 +14,6 @@
 	let {
 		children,
 		class: className = '',
-		customAnchor = null,
 		isOpen = $bindable(false),
 		onClose,
 		onKeydown,
@@ -43,7 +40,6 @@
 	<Popover.Content
 		align="start"
 		class="w-[var(--bits-popover-anchor-width)] max-w-none rounded-xl border-border/50 p-0 shadow-xl {className}"
-		{customAnchor}
 		onOpenAutoFocus={(event) => event.preventDefault()}
 		onkeydown={onKeydown}
 		preventScroll={false}

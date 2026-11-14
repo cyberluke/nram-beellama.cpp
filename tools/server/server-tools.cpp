@@ -39,25 +39,9 @@ namespace fs = std::filesystem;
 // internal helpers
 //
 
-#if defined(_WIN32)
-// code page of the system locale, read once at first use
-static UINT legacy_oem_code_page() {
-    static const UINT cp = [] {
-        DWORD value = 0;
-        const int ret = GetLocaleInfoEx(LOCALE_NAME_SYSTEM_DEFAULT, LOCALE_IDEFAULTCODEPAGE | LOCALE_RETURN_NUMBER,
-                                        reinterpret_cast<LPWSTR>(&value), sizeof(value) / sizeof(WCHAR));
-        if (ret > 0 && value && value != CP_OEMCP) {
-            return static_cast<UINT>(value);
-        }
-        return GetOEMCP();
-    }();
-    return cp;
-}
-#endif
-
-// a child process writes in the legacy console code page, so accented output would reach
-// the JSON layer as invalid bytes. run() spawns without a console, so the console
-// code page never applies
+// a child process writes in the OEM code page, so accented output would reach
+// the JSON layer as invalid bytes. run() spawns without a console, so the
+// console code page never applies
 static std::string console_output_to_utf8(const std::string & text) {
 #if defined(_WIN32)
     // a chunk can end mid sequence, so the incomplete tail is dropped first
@@ -66,7 +50,7 @@ static std::string console_output_to_utf8(const std::string & text) {
         return text;
     }
 
-    const UINT cp = legacy_oem_code_page();
+    const UINT cp = GetOEMCP();
 
     // fail rather than emit replacement characters when the code page is wrong
     const int wide_len = MultiByteToWideChar(cp, MB_ERR_INVALID_CHARS, text.data(), (int) text.size(), nullptr, 0);
@@ -112,14 +96,29 @@ enum class list_kind {
     all,   // both
 };
 
+// a narrow path uses the active code page on Windows, so every crossing between
+// a std::string (always UTF-8 here) and fs::path is converted explicitly
+static fs::path path_from_utf8(const std::string & s) {
+    return fs::u8path(s);
+}
+
+// '/' separators on every platform: Windows accepts them, the web UI needs them
+static std::string path_to_utf8(const fs::path & p) {
+    const auto s = p.generic_u8string();
+    return std::string(s.begin(), s.end());
+}
+
 // home directory, read once at first use (getenv is not thread safe against setenv)
 static const std::string & home_dir() {
     static const std::string home = [] {
 #ifdef _WIN32
-        const std::string h = common_get_env("HOME");
-        return h.empty() ? common_get_env("USERPROFILE") : h;
+        // the narrow getenv would return the profile path in the active code page
+        const wchar_t * w = _wgetenv(L"HOME");
+        if (w == nullptr) w = _wgetenv(L"USERPROFILE");
+        return w ? path_to_utf8(fs::path(w)) : std::string();
 #else
-        return common_get_env("HOME");
+        const char * h = getenv("HOME");
+        return h ? std::string(h) : std::string();
 #endif
     }();
     return home;
@@ -306,7 +305,7 @@ public:
     std::string resolve(const std::string & path) const override {
         const std::string p = expand_home(path);
 
-        fs::path full = p;
+        fs::path full = path_from_utf8(p);
         if (!full.is_absolute()) {
             if (cwd.empty()) {
                 std::error_code ec;
@@ -314,7 +313,7 @@ public:
                 if (ec) return p;
                 full = cur / full;
             } else {
-                full = fs::path(cwd) / full;
+                full = path_from_utf8(cwd) / full;
             }
         }
 
@@ -324,27 +323,27 @@ public:
         if (!full.has_filename() && full != full.root_path()) {
             full = full.parent_path();
         }
-        return full.generic_string();
+        return path_to_utf8(full);
     }
 
     bool is_directory(const std::string & path) const override {
         std::error_code ec;
-        return fs::is_directory(resolve(path), ec) && !ec;
+        return fs::is_directory(path_from_utf8(resolve(path)), ec) && !ec;
     }
 
     bool is_regular_file(const std::string & path) const override {
         std::error_code ec;
-        return fs::is_regular_file(resolve(path), ec) && !ec;
+        return fs::is_regular_file(path_from_utf8(resolve(path)), ec) && !ec;
     }
 
     bool file_size(const std::string & path, uintmax_t & out_size) const override {
         std::error_code ec;
-        out_size = fs::file_size(resolve(path), ec);
+        out_size = fs::file_size(path_from_utf8(resolve(path)), ec);
         return !ec;
     }
 
     bool read_file(const std::string & path, std::string & out) const override {
-        std::ifstream f(resolve(path), std::ios::binary);
+        std::ifstream f(path_from_utf8(resolve(path)), std::ios::binary);
         if (!f) return false;
         std::ostringstream ss;
         ss << f.rdbuf();
@@ -354,7 +353,7 @@ public:
 
     bool write_file(const std::string & path, const std::string & content) const override {
         std::error_code ec;
-        fs::path fpath = resolve(path);
+        fs::path fpath = path_from_utf8(resolve(path));
         if (fpath.has_parent_path()) {
             fs::create_directories(fpath.parent_path(), ec);
             if (ec) return false;
@@ -390,7 +389,7 @@ public:
                     if (line.empty()) continue;
                     std::replace(line.begin(), line.end(), '\\', '/');
                     if (max_depth > 0 && entry_depth(line) > max_depth) continue;
-                    if (is_regular_file((fs::path(base) / line).generic_string())) {
+                    if (is_regular_file(path_to_utf8(path_from_utf8(base) / path_from_utf8(line)))) {
                         out.entries.push_back({line, false});
                     }
                 }
@@ -460,7 +459,7 @@ private:
         std::vector<list_entry> result;
 
         std::vector<std::tuple<fs::path, fs::path, int>> stack;
-        stack.emplace_back(base, fs::path(), 0);
+        stack.emplace_back(path_from_utf8(base), fs::path(), 0);
 
         while (!stack.empty()) {
             if (std::chrono::steady_clock::now() >= deadline) {
@@ -495,16 +494,16 @@ private:
                 if (tec) continue;
                 if (is_dir) {
                     if (kind == list_kind::dirs || kind == list_kind::all) {
-                        result.push_back({(rel_dir / fname).generic_string(), true});
+                        result.push_back({path_to_utf8(rel_dir / fname), true});
                     }
                     // junk directories stay selectable but are never walked: they can be enormous
-                    if (junk_dir_names().count(get_effective_name(fname.generic_string())) > 0) continue;
+                    if (junk_dir_names().count(get_effective_name(path_to_utf8(fname))) > 0) continue;
                     if (!is_link(entry) && (max_depth == 0 || depth + 1 < max_depth)) {
                         stack.emplace_back(entry.path(), rel_dir / fname, depth + 1);
                     }
                 } else if (entry.is_regular_file(tec)) {
                     if (kind == list_kind::files || kind == list_kind::all) {
-                        result.push_back({(rel_dir / fname).generic_string(), false});
+                        result.push_back({path_to_utf8(rel_dir / fname), false});
                     }
                 }
             }
@@ -852,7 +851,7 @@ static std::unique_ptr<tools_io> make_tools_io(const json & params) {
 // no '/' in pattern -> match basename at any depth; else match full relative path
 static bool path_glob_match(const std::string & pattern, const std::string & rel_path) {
     if (pattern.find('/') == std::string::npos) {
-        return glob_match(pattern, fs::path(rel_path).filename().generic_string());
+        return glob_match(pattern, path_to_utf8(path_from_utf8(rel_path).filename()));
     }
     if (pattern == "**" || pattern.rfind("**/", 0) == 0 || pattern.rfind('/', 0) == 0) {
         return glob_match(pattern, rel_path);
@@ -896,7 +895,7 @@ struct server_tool_read_file : server_tool {
         };
     }
 
-    json invoke(json params, server_tool::stream *, const std::function<bool()> &) const override {
+    json invoke(json params, server_tool::stream *) const override {
         std::string path  = params.at("path").get<std::string>();
         int  start_line   = json_value(params, "start_line", 1);
         int  end_line     = json_value(params, "end_line",  -1); // -1 = no limit
@@ -1013,7 +1012,7 @@ struct server_tool_file_glob_search : server_tool {
         };
     }
 
-    json invoke(json params, server_tool::stream *, const std::function<bool()> &) const override {
+    json invoke(json params, server_tool::stream *) const override {
         auto io = make_tools_io(params);
 
         const std::string path = params.at("path").get<std::string>();
@@ -1128,7 +1127,7 @@ struct server_tool_grep_search : server_tool {
         };
     }
 
-    json invoke(json params, server_tool::stream *, const std::function<bool()> &) const override {
+    json invoke(json params, server_tool::stream *) const override {
         std::string path        = params.at("path").get<std::string>();
         std::string pat_str     = params.at("pattern").get<std::string>();
         std::string include     = json_value(params, "include", std::string("**"));
@@ -1175,7 +1174,7 @@ struct server_tool_grep_search : server_tool {
             for (const auto & entry : listing.entries) {
                 if (!path_glob_match(include, entry.rel)) continue;
                 if (!exclude.empty() && path_glob_match(exclude, entry.rel)) continue;
-                files.emplace_back((fs::path(abs_path) / entry.rel).generic_string(), entry.rel);
+                files.emplace_back(path_to_utf8(path_from_utf8(abs_path) / path_from_utf8(entry.rel)), entry.rel);
             }
         } else {
             return {{"error", "path does not exist: " + path}};
@@ -1271,7 +1270,7 @@ struct server_tool_exec_shell_command : server_tool {
         };
     }
 
-    json invoke(json params, server_tool::stream * st, const std::function<bool()> &) const override {
+    json invoke(json params, server_tool::stream * st) const override {
         std::string command   = params.at("command").get<std::string>();
         int    timeout        = json_value(params, "timeout",         10);
         size_t max_output     = (size_t) json_value(params, "max_output_size", (int) SERVER_TOOL_EXEC_SHELL_COMMAND_MAX_OUTPUT_SIZE);
@@ -1348,7 +1347,7 @@ struct server_tool_write_file : server_tool {
         };
     }
 
-    json invoke(json params, server_tool::stream *, const std::function<bool()> &) const override {
+    json invoke(json params, server_tool::stream *) const override {
         std::string path    = params.at("path").get<std::string>();
         std::string content = params.at("content").get<std::string>();
 
@@ -1405,7 +1404,7 @@ struct server_tool_edit_file : server_tool {
         };
     }
 
-    json invoke(json params, server_tool::stream *, const std::function<bool()> &) const override {
+    json invoke(json params, server_tool::stream *) const override {
         std::string path = params.at("path").get<std::string>();
         const json & edits_json = params.at("edits");
 
@@ -1721,7 +1720,7 @@ struct server_tool_get_info : server_tool {
         };
     }
 
-    json invoke(json params, server_tool::stream *, const std::function<bool()> &) const override {
+    json invoke(json params, server_tool::stream *) const override {
         auto io = make_tools_io(params);
 
         // inside an isolate, we always use the linux command
@@ -1742,7 +1741,7 @@ struct server_tool_get_info : server_tool {
         if (cwd.empty()) {
             if (json_value(params, "runtime", std::string()).empty()) {
                 std::error_code ec;
-                cwd = fs::current_path(ec).generic_string();
+                cwd = path_to_utf8(fs::current_path(ec));
             } else {
                 auto pwd = io->run({"pwd"}, SERVER_TOOL_GET_INFO_MAX_OUTPUT, SERVER_TOOL_GET_INFO_TIMEOUT);
                 cwd = pwd.exit_code == 0 && !pwd.timed_out ? string_strip(pwd.output) : "unknown";
@@ -1835,8 +1834,8 @@ struct server_mcp_tool : server_tool {
         };
     }
 
-    json invoke(json params, server_tool::stream *, const std::function<bool()> & should_stop) const override {
-        return mcp_mgr.call_tool(server_name, tool_name, params, should_stop);
+    json invoke(json params, server_tool::stream *) const override {
+        return mcp_mgr.call_tool(server_name, tool_name, params);
     }
 };
 
@@ -1910,7 +1909,7 @@ private:
             "llama-tools-runtime-cid-%zu.tmp", std::hash<std::thread::id>{}(std::this_thread::get_id()));
         fs::remove(cidfile, ec);
 
-        std::vector<std::string> args = {bin, "run", "--rm", "-i", "--cidfile", cidfile.generic_string(), image, "sh"};
+        std::vector<std::string> args = {bin, "run", "--rm", "-i", "--cidfile", path_to_utf8(cidfile), image, "sh"};
         int options = subprocess_option_no_window
                     | subprocess_option_inherit_environment
                     | subprocess_option_search_user_path;
@@ -2093,20 +2092,15 @@ void server_tools::setup(const std::vector<std::string> & enabled_tools,
             }
 
             // accept x-tool-runtime header to route tool I/O through an isolate, e.g. "docker-container:<id>";
-            // --tools-runtime wins: it is the sandbox, the client must not move tools out of it
+            // falls back to the --tools-runtime isolate, if configured
             if (params.contains("runtime")) {
                 params.erase("runtime");
             }
             auto runtime_header = get_header(req.headers, "x-tool-runtime");
-            if (runtime) {
-                if (!runtime_header.empty()) {
-                    res->status = 403;
-                    res->data   = safe_json_to_str(format_error_response("x-tool-runtime is not allowed when --tools-runtime is set", ERROR_TYPE_PERMISSION));
-                    return res;
-                }
-                params["runtime"] = runtime->spec();
-            } else if (!runtime_header.empty()) {
+            if (!runtime_header.empty()) {
                 params["runtime"] = runtime_header;
+            } else if (runtime) {
+                params["runtime"] = runtime->spec();
             }
 
             // x-resp-type header is only used by read_file for now
@@ -2133,7 +2127,7 @@ void server_tools::setup(const std::vector<std::string> & enabled_tools,
 
                     auto done = std::make_unique<server_tool_stream_result>();
                     try {
-                        tool.invoke(params, &st, req.should_stop);
+                        tool.invoke(params, &st);
                     } catch (const std::exception & e) {
                         done->error_msg = e.what();
                     } catch (...) {
@@ -2158,7 +2152,7 @@ void server_tools::setup(const std::vector<std::string> & enabled_tools,
                     return true;
                 };
             } else {
-                json result = tool.invoke(params, nullptr, req.should_stop);
+                json result = tool.invoke(params, nullptr);
                 res->status = 200;
                 res->data   = safe_json_to_str(result);
             }

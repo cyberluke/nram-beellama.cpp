@@ -112,8 +112,7 @@ export { default as DialogConfirmation } from './DialogConfirmation.svelte';
  * **DialogSearch** - Spotlight-style search over chats and sidebar actions
  *
  * Opens over the app with a focused input and a keyboard-driven result list:
- * arrow keys move the highlight, Enter opens, Escape closes. A phone shows it full screen, like
- * every dialog.
+ * arrow keys move the highlight, Enter opens, Escape closes. Desktop only; phones use the `/search` page.
  */
 export { default as DialogSearch } from './DialogSearch.svelte';
 
@@ -176,24 +175,6 @@ export { default as DialogConversationDelete } from './DialogConversationDelete.
  * ```
  */
 export { default as DialogConversationRename } from './DialogConversationRename.svelte';
-
-/**
- * **DialogGroup** - Name a new sidebar group, or rename one
- *
- * Opened through `uiStore.openGroupDialog()`, from the Recent heading's
- * menus to create a group and from a group's menus to rename it. Mounted
- * once, in the sidebar.
- */
-export { default as DialogGroup } from './DialogGroup.svelte';
-
-/**
- * **DialogGroupPicker** - Pick the group a chat moves to, on a phone
- *
- * Opened through `uiStore.openGroupPicker()` where a desktop menu shows the
- * group submenu: a search that filters the groups and creates one with
- * the typed name. Mounted once, in the sidebar.
- */
-export { default as DialogGroupPicker } from './DialogGroupPicker.svelte';
 
 /**
  *

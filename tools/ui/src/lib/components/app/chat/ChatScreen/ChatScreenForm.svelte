@@ -2,11 +2,9 @@
 	import { afterNavigate } from '$app/navigation';
 	import { page } from '$app/state';
 	import { ChatForm } from '$lib/components/app';
-	import { SETTINGS_KEYS } from '$lib/constants';
 	import { useDraftMessages } from '$lib/hooks/use-draft-messages.svelte';
-	import { deviceStore, settingsStore } from '$lib/stores';
-	import { hapticTap } from '$lib/utils';
-	import { onMount, tick } from 'svelte';
+	import { deviceStore } from '$lib/stores';
+	import { onMount } from 'svelte';
 
 	interface Props {
 		class?: string;
@@ -83,10 +81,6 @@
 
 		if (!chatFormRef?.checkModelSelected()) return;
 
-		// the message goes: a phone confirms it by feel. Before any await, so it still runs inside
-		// the tap or keypress that sent it, which iOS needs to play the tick
-		hapticTap();
-
 		const messageToSend = message.trim();
 		const filesToSend = [...uploadedFiles];
 
@@ -94,14 +88,13 @@
 		uploadedFiles = [];
 		clearDraft();
 
-		// called in the same task: the page still sees the form as it was sent (expanded or not)
+		chatFormRef?.resetTextareaHeight();
+
 		const success = await onSend?.(messageToSend, filesToSend);
 
 		if (!success) {
 			message = messageToSend;
 			uploadedFiles = filesToSend;
-			await tick();
-			chatFormRef?.expandForMessage();
 		}
 	}
 
@@ -111,10 +104,6 @@
 
 	function handleUploadedFileRemove(fileId: string) {
 		onFileRemove?.(fileId);
-	}
-
-	export function openWorkingDirectoryPicker() {
-		chatFormRef?.openWorkingDirectoryPicker();
 	}
 
 	// Auto-focus must not steal focus already claimed elsewhere (e.g. the system
@@ -155,13 +144,11 @@
 		bind:value={message}
 		class="mx-auto max-w-3xl {className}"
 		{disabled}
-		expandable
 		{isLoading}
 		onFilesAdd={handleFilesAdd}
 		{onStop}
 		onSubmit={handleSubmit}
 		onSystemPromptClick={handleSystemPromptClick}
 		onUploadedFileRemove={handleUploadedFileRemove}
-		singleRow={settingsStore.config[SETTINGS_KEYS.SINGLE_ROW_CHAT_FORM] !== false}
 	/>
 </div>

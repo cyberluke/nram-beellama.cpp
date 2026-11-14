@@ -8,7 +8,6 @@
 	import { Button } from '$lib/components/ui/button';
 	import { HuggingFaceService } from '$lib/services';
 	import type { HfModelDetailInfo, HfModelGguf } from '$lib/types/huggingface';
-	import type { ModelModalities } from '$lib/types/models';
 	import { orgOf } from '$lib/utils';
 
 	interface Props {
@@ -17,21 +16,13 @@
 		gguf?: HfModelGguf;
 		baseModels: string[];
 		licenseTag: string | null;
-		modalities: ModelModalities;
+		hasVision: boolean;
 		hasTools: boolean;
 		hasReasoning: boolean;
 	}
 
-	let {
-		baseModels,
-		details,
-		gguf,
-		hasReasoning,
-		hasTools,
-		licenseTag,
-		modalities,
-		modelId
-	}: Props = $props();
+	let { baseModels, details, gguf, hasReasoning, hasTools, hasVision, licenseTag, modelId }: Props =
+		$props();
 
 	// Avatar shows the base model's org (e.g. the Qwen logo for a ggml-org GGUF)
 	// with the quant org as a corner badge when they differ.
@@ -59,7 +50,7 @@
 					<ModelCapabilityIcons
 						gapClass="gap-2"
 						iconSize="h-4 w-4"
-						{modalities}
+						modalities={{ audio: false, video: false, vision: hasVision }}
 						supportsThinking={hasReasoning}
 						supportsToolUse={hasTools}
 					/>

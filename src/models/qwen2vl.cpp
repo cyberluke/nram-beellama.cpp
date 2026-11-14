@@ -36,10 +36,10 @@ void llama_model_qwen2vl::load_arch_tensors(llama_model_loader &) {
 }
 
 std::unique_ptr<llm_graph_context> llama_model_qwen2vl::build_arch_graph(const llm_graph_params & params) const {
-    return std::make_unique<graph>(params);
+    return std::make_unique<graph>(*this, params);
 }
 
-llama_model_qwen2vl::graph::graph(const llm_graph_params & params) : llm_graph_context(params) {
+llama_model_qwen2vl::graph::graph(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {
     const int64_t n_embd_head = hparams.n_embd_head_v();
 
     GGML_ASSERT(n_embd_head == hparams.n_embd_head_k());
@@ -54,6 +54,9 @@ llama_model_qwen2vl::graph::graph(const llm_graph_params & params) : llm_graph_c
     ggml_tensor * inp_pos = build_inp_pos();
 
     auto * inp_attn = build_attn_inp_kv();
+
+    int sections[4];
+    std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
 
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
@@ -72,8 +75,17 @@ llama_model_qwen2vl::graph::graph(const llm_graph_params & params) : llm_graph_c
             auto [Qcur, Kcur, Vcur] = build_qkv(model.layers[il], cur,
                     n_embd_head, n_head, n_head_kv, il);
 
-            Qcur = build_rope(Qcur, inp_pos, il);
-            Kcur = build_rope(Kcur, inp_pos, il);
+            Qcur = ggml_rope_multi(
+                    ctx0, Qcur, inp_pos, nullptr,
+                    n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+                    ext_factor, attn_factor, beta_fast, beta_slow
+                    );
+
+            Kcur = ggml_rope_multi(
+                    ctx0, Kcur, inp_pos, nullptr,
+                    n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
+                    ext_factor, attn_factor, beta_fast, beta_slow
+                    );
 
             cb(Qcur, "Qcur", il);
             cb(Kcur, "Kcur", il);
@@ -97,9 +109,9 @@ llama_model_qwen2vl::graph::graph(const llm_graph_params & params) : llm_graph_c
         cb(cur, "ffn_norm", il);
 
         cur = build_ffn(cur,
-                model.layers[il].ffn_up,   NULL, model.layers[il].ffn_up_s,
-                model.layers[il].ffn_gate, NULL, model.layers[il].ffn_gate_s,
-                model.layers[il].ffn_down, NULL, model.layers[il].ffn_down_s,
+                model.layers[il].ffn_up,   NULL, NULL,
+                model.layers[il].ffn_gate, NULL, NULL,
+                model.layers[il].ffn_down, NULL, NULL,
                 NULL,
                 LLM_FFN_SILU, LLM_FFN_PAR, il);
         cb(cur, "ffn_out", il);

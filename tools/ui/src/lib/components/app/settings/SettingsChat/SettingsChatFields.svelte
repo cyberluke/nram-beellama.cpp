@@ -141,7 +141,7 @@
 				<Textarea
 					class="min-h-[10rem] w-full md:max-w-3xl"
 					id={field.key}
-					oninput={(e) => onConfigChange(field.key, e.currentTarget.value)}
+					onchange={(e) => onConfigChange(field.key, e.currentTarget.value)}
 					placeholder=""
 					value={String(localConfig[field.key] ?? '')}
 				/>

@@ -112,7 +112,6 @@
 	let editedUploadedFiles = $state<ChatUploadedFile[]>([]);
 	let isEditing = $state(false);
 	let showDeleteDialog = $state(false);
-	let showForkDialog = $state(false);
 	let shouldBranchAfterEdit = $state(false);
 	let textareaElement: HTMLTextAreaElement | undefined = $state();
 
@@ -189,14 +188,8 @@
 		navigateToSibling: handleNavigateToSibling,
 		requestDelete: handleDelete,
 		setShowDeleteDialog: handleShowDeleteDialogChange,
-		setShowForkDialog: (show: boolean) => {
-			showForkDialog = show;
-		},
 		get showDeleteDialog() {
 			return showDeleteDialog;
-		},
-		get showForkDialog() {
-			return showForkDialog;
 		},
 		get siblingInfo() {
 			return siblingInfo;
@@ -342,7 +335,7 @@
 	function focusMainChatForm() {
 		if (deviceStore.isMobile) return;
 
-		document.querySelector<HTMLElement>('.chat-screen-form-wrapper .cm-content')?.focus();
+		document.querySelector<HTMLTextAreaElement>('.chat-screen-form-wrapper textarea')?.focus();
 	}
 
 	async function handleSaveEdit() {

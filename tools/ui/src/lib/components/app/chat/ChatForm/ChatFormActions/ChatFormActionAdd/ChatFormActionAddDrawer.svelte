@@ -3,7 +3,6 @@
 		ChevronDown,
 		ChevronRight,
 		File,
-		Folder,
 		Image,
 		MessageSquare,
 		Mic,
@@ -135,21 +134,6 @@
 
 					<span>{ATTACHMENT_MENU_TEXT.SYSTEM_MESSAGE}</span>
 				</button>
-
-				{#if chatFormActions.onWorkingDirectoryClick}
-					<button
-						class={itemClass}
-						onclick={() => {
-							drawerOpen = false;
-							chatFormActions.onWorkingDirectoryClick?.();
-						}}
-						type="button"
-					>
-						<Folder class="{ICON_CLASS_DEFAULT} shrink-0" />
-
-						<span class="truncate">{chatFormActions.workingDirectoryLabel}</span>
-					</button>
-				{/if}
 
 				{#if toolsPanel.totalToolCount > 0}
 					<Collapsible.Root onOpenChange={(open) => (toolsExpanded = open)} open={toolsExpanded}>

@@ -11,15 +11,6 @@
 	import { chatStore, conversationsStore, deviceStore } from '$lib/stores';
 	import { untrack } from 'svelte';
 
-	interface Props {
-		/** Sizes and places the trigger, the inline dial size by default. */
-		class?: string;
-		/** Draws the dial as the icon of a phone's corner key, matching the menu key's glyph. */
-		corner?: boolean;
-	}
-
-	let { class: className = 'h-5 w-5 max-md:h-6 max-md:w-6', corner = false }: Props = $props();
-
 	const gauge = useContextGauge();
 
 	$effect(() => {
@@ -52,7 +43,7 @@
 
 <div
 	aria-label="Context usage"
-	class={['flex cursor-default items-center justify-center', className]}
+	class="flex h-5 w-5 cursor-default items-center justify-center max-md:h-6 max-md:w-6"
 	data-context-gauge-trigger
 	onclick={gaugeTriggerClick}
 	onkeydown={gaugeTriggerKeydown}
@@ -66,6 +57,6 @@
 	<ContextGaugeDial
 		level={gauge.colorLevel}
 		percent={gauge.contextPercent}
-		size={corner ? 'key' : deviceStore.isMobile ? 'md' : 'sm'}
+		size={deviceStore.isMobile ? 'md' : 'sm'}
 	/>
 </div>

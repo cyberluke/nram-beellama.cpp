@@ -84,14 +84,9 @@ struct context {
         // inherit variables (for example, when entering a new scope)
         env(mk_val<value_object>(*parent.env)) {}
 
-    // returns nullptr if not found
-    value find_val(const value & key) {
-        return env->find(key);
-    }
-
     value get_val(const std::string & name) {
-        auto result = find_val(mk_val<value_string>(name));
-        return result ? result : mk_val<value_undefined>(name);
+        value default_val = mk_val<value_undefined>(name);
+        return env->at(name, default_val);
     }
 
     void set_val(const std::string & name, const value & val) {
@@ -109,12 +104,6 @@ struct context {
 private:
     value_object env;
 };
-
-// values cached in the AST are shared across renders, but stats mutate values, so stats mode gets a fresh copy
-template<typename T>
-value cached_val(const context & ctx, const value & cached) {
-    return ctx.is_get_stats ? mk_val<T>(*cast_val<T>(cached)) : cached;
-}
 
 // utils for visiting AST nodes
 static std::vector<const statement *> stmts_to_ptr(const statements & stmts) {
@@ -339,8 +328,11 @@ struct member_expression : public expression {
     statement_ptr property;
     bool computed; // true if obj[expr] and false if obj.prop
 
-    value static_property; // set if property is an identifier, see cached_val()
-    member_expression(statement_ptr && object, statement_ptr && property, bool computed);
+    member_expression(statement_ptr && object, statement_ptr && property, bool computed)
+        : object(std::move(object)), property(std::move(property)), computed(computed) {
+        chk_type<expression>(this->object);
+        chk_type<expression>(this->property);
+    }
     std::string type() const override { return "MemberExpression"; }
     value execute_impl(context & ctx) const override;
     void visit(context & ctx) const override {
@@ -375,8 +367,7 @@ struct call_expression : public expression {
  */
 struct identifier : public expression {
     std::string val;
-    const value key; // lookup key, safe to share across renders as lookups do not touch stats
-    explicit identifier(const std::string & val) : val(val), key(mk_val<value_string>(val)) {}
+    explicit identifier(const std::string & val) : val(val) {}
     std::string type() const override { return "Identifier"; }
     value execute_impl(context & ctx) const override;
 };
@@ -385,31 +376,28 @@ struct identifier : public expression {
 
 struct integer_literal : public expression {
     int64_t val;
-    const value constant; // see cached_val()
-    explicit integer_literal(int64_t val) : val(val), constant(mk_val<value_int>(val)) {}
+    explicit integer_literal(int64_t val) : val(val) {}
     std::string type() const override { return "IntegerLiteral"; }
-    value execute_impl(context & ctx) const override {
-        return cached_val<value_int>(ctx, constant);
+    value execute_impl(context &) const override {
+        return mk_val<value_int>(val);
     }
 };
 
 struct float_literal : public expression {
     double val;
-    const value constant; // see cached_val()
-    explicit float_literal(double val) : val(val), constant(mk_val<value_float>(val)) {}
+    explicit float_literal(double val) : val(val) {}
     std::string type() const override { return "FloatLiteral"; }
-    value execute_impl(context & ctx) const override {
-        return cached_val<value_float>(ctx, constant);
+    value execute_impl(context &) const override {
+        return mk_val<value_float>(val);
     }
 };
 
 struct string_literal : public expression {
     std::string val;
-    const value constant; // see cached_val()
-    explicit string_literal(const std::string & val) : val(val), constant(mk_val<value_string>(val)) {}
+    explicit string_literal(const std::string & val) : val(val) {}
     std::string type() const override { return "StringLiteral"; }
-    value execute_impl(context & ctx) const override {
-        return cached_val<value_string>(ctx, constant);
+    value execute_impl(context &) const override {
+        return mk_val<value_string>(val);
     }
 };
 
@@ -479,28 +467,6 @@ struct binary_expression : public expression {
         ctx.visitor(false, this, {
             {"left", {left.get()}},
             {"right", {right.get()}}
-        });
-    }
-};
-
-/**
- * Two or more comparisons in a row, e.g. `a < b <= c`
- * It is the same as `a < b and b <= c`, but each operand is executed only one time.
- */
-struct comparison_chain_expression : public expression {
-    statements operands;
-    std::vector<token> ops;
-
-    comparison_chain_expression(statements && operands, std::vector<token> && ops)
-        : operands(std::move(operands)), ops(std::move(ops)) {
-        assert(this->operands.size() == this->ops.size() + 1);
-        for (const auto & operand : this->operands) chk_type<expression>(operand);
-    }
-    std::string type() const override { return "ComparisonChainExpression"; }
-    value execute_impl(context & ctx) const override;
-    void visit(context & ctx) const override {
-        ctx.visitor(false, this, {
-            {"operands", stmts_to_ptr(operands)}
         });
     }
 };
@@ -667,9 +633,7 @@ struct keyword_argument_expression : public expression {
 
 struct spread_expression : public expression {
     statement_ptr argument;
-    bool is_kwargs;
-    spread_expression(statement_ptr && argument, bool is_kwargs)
-        : argument(std::move(argument)), is_kwargs(is_kwargs) {
+    explicit spread_expression(statement_ptr && argument) : argument(std::move(argument)) {
         chk_type<expression>(this->argument);
     }
     std::string type() const override { return "SpreadExpression"; }
@@ -760,7 +724,7 @@ static void gather_string_parts_recursive(const value & val, value_string & part
     } else if (is_val<value_array>(val) && depth >= JINJA_RECURSIVE_LIMIT) {
         throw std::runtime_error("value is nested more than " + std::to_string(JINJA_RECURSIVE_LIMIT) + " levels deep");
     } else if (is_val<value_array>(val)) {
-        const auto & items = cast_val<value_array>(val)->as_array();
+        auto items = cast_val<value_array>(val)->as_array();
         for (const auto & item : items) {
             gather_string_parts_recursive(item, parts, depth + 1);
         }

@@ -12,7 +12,6 @@ dir_tokenizer = args.dir_tokenizer
 fname_tok = args.fname_tok
 
 tokenizer = AutoTokenizer.from_pretrained(dir_tokenizer)
-assert tokenizer is not None
 
 print('tokenizing file: ', fname_tok) # noqa: NP100
 fname_out = fname_tok + '.tok'
@@ -20,7 +19,7 @@ with open(fname_tok, 'r', encoding='utf-8') as f:
     lines = f.readlines()
     s = ''.join(lines)
     t_start = time.time()
-    res = tokenizer.encode(s, add_special_tokens=False)
+    res = tokenizer.encode(s, add_special_tokens=False)  # ty: ignore[unresolved-attribute]
     t_end = time.time()
     print('\nmain : tokenized in', "{:.3f}".format(1000.0 * (t_end - t_start)), 'ms (py)') # noqa: NP100
     with open(fname_out, 'w', encoding='utf-8') as f:

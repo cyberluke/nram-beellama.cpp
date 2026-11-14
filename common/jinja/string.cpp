@@ -43,59 +43,14 @@ void string::mark_input() {
 }
 
 std::string string::str() const {
-    std::string result;
-    result.reserve(length());
+    if (parts.size() == 1) {
+        return parts[0].val;
+    }
+    std::ostringstream oss;
     for (const auto & part : parts) {
-        result += part.val;
+        oss << part.val;
     }
-    return result;
-}
-
-bool string::empty() const {
-    for (const auto & part : parts) {
-        if (!part.val.empty()) {
-            return false;
-        }
-    }
-    return true;
-}
-
-std::optional<char> string::byte_at(size_t index) const {
-    for (const auto & part : parts) {
-        if (index < part.val.size()) {
-            return part.val[index];
-        }
-        index -= part.val.size();
-    }
-    return {};
-}
-
-bool string::equals(const string & other) const {
-    size_t part = 0, offset = 0;
-    for (const auto & left : parts) {
-        std::string_view text(left.val);
-        while (!text.empty()) {
-            while (part < other.parts.size() && offset == other.parts[part].val.size()) {
-                ++part;
-                offset = 0;
-            }
-            if (part == other.parts.size()) {
-                return false;
-            }
-            const auto & right = other.parts[part].val;
-            const auto count = std::min(text.size(), right.size() - offset);
-            if (text.substr(0, count) != std::string_view(right).substr(offset, count)) {
-                return false;
-            }
-            text.remove_prefix(count);
-            offset += count;
-        }
-    }
-    while (part < other.parts.size() && offset == other.parts[part].val.size()) {
-        ++part;
-        offset = 0;
-    }
-    return part == other.parts.size();
+    return oss.str();
 }
 
 size_t string::length() const {

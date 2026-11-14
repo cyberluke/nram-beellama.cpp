@@ -16,7 +16,6 @@ import {
 	FileSearch,
 	FileText,
 	Info,
-	MessagesSquare,
 	SearchCode,
 	Terminal
 } from '@lucide/svelte';
@@ -33,11 +32,6 @@ export const TOOL_UI: Readonly<Record<BuiltInTool, ToolUiEntry>> = {
 	[BuiltInTool.BROWSER_RUN_JAVASCRIPT]: {
 		icon: Braces,
 		label: 'Run JavaScript',
-		source: ToolSource.BROWSER
-	},
-	[BuiltInTool.BROWSER_SEARCH_CHATS]: {
-		icon: MessagesSquare,
-		label: 'Search chats',
 		source: ToolSource.BROWSER
 	},
 	[BuiltInTool.SERVER_EDIT_FILE]: { icon: FilePen, label: 'Edit file', source: ToolSource.SERVER },

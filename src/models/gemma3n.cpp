@@ -7,11 +7,6 @@ void llama_model_gemma3n::load_arch_hparams(llama_model_loader & ml) {
     hparams.n_layer_kv_from_start = 20;
     hparams.f_attention_scale     = 1.0f;
 
-    // shared layers read the KV of the last layer with own KV and the same SWA type
-    for (uint32_t il = hparams.n_layer_kv_from_start; il < hparams.n_layer_all; il++) {
-        hparams.kv_source_impl[il] = hparams.n_layer_kv_from_start - (hparams.is_swa(il) ? 2 : 1);
-    }
-
     ml.get_key(LLM_KV_ROPE_FREQ_BASE_SWA,          hparams.rope_freq_base_train_swa, false);
     ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW,    hparams.n_swa);
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
@@ -30,13 +25,13 @@ void llama_model_gemma3n::load_arch_tensors(llama_model_loader &) {
     const int64_t laurel_rank  = hparams.laurel_rank;
     const int64_t n_embd_altup = hparams.n_embd_altup;
 
-    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
-
     output = create_tensor(tn(LLM_TENSOR_OUTPUT, "weight"), {n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
     // if output is NULL, init from the input tok embed
     if (output == NULL) {
         output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
     }
+
+    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
 
     altup_proj        = create_tensor(tn(LLM_TENSOR_ALTUP_PROJ,        "weight"), {n_embd, n_embd, n_altup - 1}, 0);
     altup_unembd_proj = create_tensor(tn(LLM_TENSOR_ALTUP_UNEMBD_PROJ, "weight"), {n_embd, n_embd, n_altup - 1}, 0);
@@ -81,7 +76,7 @@ void llama_model_gemma3n::load_arch_tensors(llama_model_loader &) {
 }
 
 std::unique_ptr<llm_graph_context> llama_model_gemma3n::build_arch_graph(const llm_graph_params & params) const {
-    return std::make_unique<graph>(params);
+    return std::make_unique<graph>(*this, params);
 }
 
 // get 2D slice view from a 3D tensor, the idx corresponds to the 3rd dim
@@ -91,8 +86,9 @@ static ggml_tensor * gemma3n_view_2d_slice(ggml_context * ctx0, ggml_tensor * x,
                         idx * x->ne[0] * x->ne[1] * ggml_element_size(x));
 }
 
-llama_model_gemma3n::graph::graph(const llm_graph_params & params) :
+llama_model_gemma3n::graph::graph(const llama_model & model, const llm_graph_params & params) :
     llm_graph_context(params),
+    model(model),
     n_embd_head(model.hparams.n_embd_head_k()),
     n_embd_altup(model.hparams.n_embd_altup),
     n_altup(model.hparams.n_altup),
@@ -132,6 +128,8 @@ llama_model_gemma3n::graph::graph(const llm_graph_params & params) :
 
     for (int il = 0; il < n_layer; ++il) {
         // this block is made to be closely resemble Gemma3p5DecoderLayer on python code
+        const float freq_base_l  = model.get_rope_freq_base(cparams, il);
+        const float freq_scale_l = model.get_rope_freq_scale(cparams, il);
 
         ggml_tensor * cur         = inpL;                    // [n_embd, n_tokens, n_altup]
         ggml_tensor * predictions = altup_predict(cur, il);  // [n_embd, n_tokens, n_altup]
@@ -160,8 +158,11 @@ llama_model_gemma3n::graph::graph(const llm_graph_params & params) :
             cb(Kcur, "Kcur_normed", il);
             cb(Vcur, "Vcur_normed", il);
 
-            Qcur = build_rope(Qcur, inp_pos, il);
-            Kcur = build_rope(Kcur, inp_pos, il);
+            Qcur = ggml_rope_ext(ctx0, Qcur, inp_pos, nullptr, n_rot, rope_type, n_ctx_orig, freq_base_l, freq_scale_l,
+                                 ext_factor, attn_factor, beta_fast, beta_slow);
+
+            Kcur = ggml_rope_ext(ctx0, Kcur, inp_pos, nullptr, n_rot, rope_type, n_ctx_orig, freq_base_l, freq_scale_l,
+                                 ext_factor, attn_factor, beta_fast, beta_slow);
 
             cb(Qcur, "Qcur_pos", il);
             cb(Kcur, "Kcur_pos", il);
@@ -185,7 +186,8 @@ llama_model_gemma3n::graph::graph(const llm_graph_params & params) :
             Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, NULL, LLM_NORM_RMS, il);
             cb(Qcur, "Qcur_normed", il);
 
-            Qcur = build_rope(Qcur, inp_pos, il);
+            Qcur = ggml_rope_ext(ctx0, Qcur, inp_pos, nullptr, n_rot, rope_type, n_ctx_orig, freq_base_l, freq_scale_l,
+                                 ext_factor, attn_factor, beta_fast, beta_slow);
             cb(Qcur, "Qcur_pos", il);
 
             cur = build_attn(inp_attn,
