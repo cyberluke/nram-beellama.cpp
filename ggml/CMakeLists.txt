@@ -3,8 +3,8 @@ cmake_minimum_required(VERSION 3.14...3.28) # for add_link_options and implicit 
 project("ggml" C CXX ASM)
 
 ### GGML Version
-set(GGML_VERSION_MAJOR 0)
-set(GGML_VERSION_MINOR 28)
+set(GGML_VERSION_MAJOR 1)
+set(GGML_VERSION_MINOR 0)
 set(GGML_VERSION_PATCH 0)
 set(GGML_VERSION_BASE "${GGML_VERSION_MAJOR}.${GGML_VERSION_MINOR}.${GGML_VERSION_PATCH}")
 
@@ -204,12 +204,13 @@ option(GGML_CUDA_FORCE_CUBLAS               "ggml: always use cuBLAS instead of 
 option(GGML_CUDA_NO_PEER_COPY               "ggml: do not use peer to peer copies"            OFF)
 option(GGML_CUDA_NO_VMM                     "ggml: do not try to use CUDA VMM"                OFF)
 option(GGML_CUDA_FA                         "ggml: compile ggml FlashAttention CUDA kernels"  ON)
-option(GGML_CUDA_FA_ALL_QUANTS              "ggml: compile full K/V cache quant pair matrix for FlashAttention" OFF)
+option(GGML_CUDA_FA_ALL_QUANTS              "ggml: compile all quants for FlashAttention"     OFF)
 option(GGML_CUDA_KVARN                      "ggml: compile CUDA KVarN kernels" ON)
-# Empty means Bee's balanced default matrix; custom pairs and `all` use upstream's selector.
-set(GGML_CUDA_FA_QUANTS "" CACHE STRING "ggml: FlashAttention K-V type combinations, all or type_K-type_V list (empty: balanced default)")
+# KVarN fast-decode cache resets: n/a in upstream; kept for fork's balanced default matrix.
 unset(GGML_CUDA_KVARN_FA CACHE)
 unset(GGML_CUDA_KVARN_FAST_DECODE_ALL_PAIRS CACHE)
+set   (GGML_CUDA_FA_QUANTS "q4_0-q4_0;q8_0-q8_0;f16-f16;bf16-bf16;f8_e4m3-f8_e4m3" CACHE STRING
+                                            "ggml: FlashAttention K-V type combinations to compile, \"all\" or a list such as \"q8_0-q8_0;q8_0-q4_0\"")
 option(GGML_CUDA_GRAPHS                     "ggml: use CUDA graphs (llama.cpp only)"          ${GGML_CUDA_GRAPHS_DEFAULT})
 option(GGML_CUDA_NCCL                       "ggml: use NVIDIA Collective Comm. Library"       ON)
 set   (GGML_CUDA_COMPRESSION_MODE "size" CACHE STRING

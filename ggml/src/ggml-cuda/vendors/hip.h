@@ -56,6 +56,9 @@
 #define cublasHandle_t hipblasHandle_t
 #define cublasSetMathMode(handle, mode) CUBLAS_STATUS_SUCCESS
 #define cublasSetStream hipblasSetStream
+#if HIP_VERSION >= 70000000
+#define cublasSetWorkspace hipblasSetWorkspace
+#endif // HIP_VERSION >= 70000000
 #define cublasSgemm hipblasSgemm
 #define cublasSgemmBatched hipblasSgemmBatched
 #define cublasSgemmStridedBatched hipblasSgemmStridedBatched
@@ -70,7 +73,9 @@
 #define cudaDeviceProp hipDeviceProp_t
 #define cudaDeviceSynchronize hipDeviceSynchronize
 #define cudaError_t hipError_t
+#define CUresult hipError_t
 #define cudaErrorMemoryAllocation hipErrorOutOfMemory
+#define CUDA_ERROR_OUT_OF_MEMORY hipErrorOutOfMemory
 #define cudaErrorPeerAccessAlreadyEnabled hipErrorPeerAccessAlreadyEnabled
 #define cudaErrorPeerAccessNotEnabled hipErrorPeerAccessNotEnabled
 #define cudaEventCreateWithFlags hipEventCreateWithFlags
