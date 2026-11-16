@@ -1615,6 +1615,7 @@ private:
 
             init_opt.video_params.fps_target = params_base.video_fps;
             init_opt.video_params.timestamp_interval_ms = params_base.video_timestamp_interval_ms;
+            init_opt.video_params.max_frames = params_base.video_max_frames;
             init_opt.video_params.ffmpeg_bin_dir = params_base.video_ffmpeg_bin_dir.empty()
                                 ? nullptr : params_base.video_ffmpeg_bin_dir.c_str();
 
@@ -6153,7 +6154,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             const json & data,
             const std::vector<raw_buffer> & files,
             task_response_type res_type,
-            const common_chat_session & chat_session) {
+            const common_chat_session & chat_session,
+            const mtmd_helper_init_opt * req_init_opt) {
     GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
 
     auto res = create_response();
@@ -6190,6 +6192,21 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         // process prompt
         std::vector<server_tokens> inputs;
 
+        // Per-request video sampling override (fps / max_frames seen on an
+        // input_video / video_url content item). Defaults to the server-global
+        // --video-fps / --video-max-frames when no item overrides them.
+        mtmd_helper_init_opt use_init_opt = ctx_server.init_opt;
+        if (req_init_opt) {
+            if (req_init_opt->video_params.fps_target > 0.0f) {
+                use_init_opt.video_params.fps_target = req_init_opt->video_params.fps_target;
+            }
+            if (req_init_opt->video_params.max_frames > 0) {
+                use_init_opt.video_params.max_frames = req_init_opt->video_params.max_frames;
+            }
+            LOG_DBG("handle_completions_impl: req fps=%g max_frames=%d\n",
+                    use_init_opt.video_params.fps_target, use_init_opt.video_params.max_frames);
+        }
+
         if (data.contains("prompt_parts") && data.at("prompt_parts").is_array() && !data.at("prompt_parts").empty()) {
             // OAI-compat chat path with input-marking metadata from the jinja
             // template: use the shared input-marking-aware tokenization, which
@@ -6201,14 +6218,14 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             for (const auto & p : data.at("prompt_parts")) {
                 parts.push_back({p.at("text").get<std::string>(), p.at("is_input").get<bool>()});
             }
-            inputs.push_back(server_tokenize_prompt_parts(ctx_server.vocab, ctx_server.mctx, parts, files, ctx_server.init_opt, /*add_special=*/true));
+            inputs.push_back(server_tokenize_prompt_parts(ctx_server.vocab, ctx_server.mctx, parts, files, use_init_opt, /*add_special=*/true));
         } else if (res_type != TASK_RESPONSE_TYPE_NONE && ctx_server.mctx != nullptr) {
             // This is the case used by OAI compatible chat path with MTMD (no prompt_parts, e.g. legacy templates).
             // TODO It can be moved to the path below.
-            inputs.push_back(process_mtmd_prompt(ctx_server.mctx, prompt.get<std::string>(), files, ctx_server.init_opt));
+            inputs.push_back(process_mtmd_prompt(ctx_server.mctx, prompt.get<std::string>(), files, use_init_opt));
         } else {
             // Everything else, including multimodal completions.
-            inputs = tokenize_input_prompts(ctx_server.vocab, ctx_server.mctx, prompt, true, true, ctx_server.init_opt);
+            inputs = tokenize_input_prompts(ctx_server.vocab, ctx_server.mctx, prompt, true, true, use_init_opt);
         }
 
         // tasks.reserve(inputs.size()); // TODO: this is inaccurate due to child tasks
@@ -6824,36 +6841,45 @@ void server_routes::init_routes() {
         );
 
         std::vector<raw_buffer> files; // dummy
+        common_chat_session session;
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_INFILL,
             data,
             files,
-            TASK_RESPONSE_TYPE_NONE); // infill is not OAI compatible
+            TASK_RESPONSE_TYPE_NONE, // infill is not OAI compatible
+            session,
+            nullptr);
     };
 
     this->post_completions = [this](const server_http_req & req) {
         auto res = create_response();
         std::vector<raw_buffer> files; // dummy
+        common_chat_session session;
         const json body = json::parse(req.body);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
             body,
             files,
-            TASK_RESPONSE_TYPE_NONE);
+            TASK_RESPONSE_TYPE_NONE,
+            session,
+            nullptr);
     };
 
     this->post_completions_oai = [this](const server_http_req & req) {
         auto res = create_response();
         std::vector<raw_buffer> files; // dummy
+        common_chat_session session;
         const json body = json::parse(req.body);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
             body,
             files,
-            TASK_RESPONSE_TYPE_OAI_CMPL);
+            TASK_RESPONSE_TYPE_OAI_CMPL,
+            session,
+            nullptr);
     };
 
     this->post_chat_completions = [this](const server_http_req & req) {
@@ -6861,19 +6887,22 @@ void server_routes::init_routes() {
         std::vector<raw_buffer> files;
         json body = json::parse(req.body);
         common_chat_session session;
+        mtmd_helper_init_opt req_init_opt = ctx_server.init_opt;
         json body_parsed = oaicompat_chat_params_parse(
             ctx_server.vocab,
             body,
             meta->chat_params,
             files,
-            session);
+            session,
+            &req_init_opt);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
             body_parsed,
             files,
             TASK_RESPONSE_TYPE_OAI_CHAT,
-            session);
+            session,
+            &req_init_opt);
     };
 
     this->post_chat_completions_tok = [this](const server_http_req & req) {
@@ -6924,19 +6953,22 @@ void server_routes::init_routes() {
         SRV_DBG("%s\n", "Request converted: OpenAI Responses -> OpenAI Chat Completions");
         SRV_DBG("converted request: %s\n", body.dump().c_str());
         common_chat_session session;
+        mtmd_helper_init_opt req_init_opt = ctx_server.init_opt;
         json body_parsed = oaicompat_chat_params_parse(
             ctx_server.vocab,
             body,
             meta->chat_params,
             files,
-            session);
+            session,
+            &req_init_opt);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
             body_parsed,
             files,
             TASK_RESPONSE_TYPE_OAI_RESP,
-            session);
+            session,
+            &req_init_opt);
     };
 
     this->post_responses_tok_oai = [this](const server_http_req & req) {
@@ -6965,14 +6997,16 @@ void server_routes::init_routes() {
             body,
             meta->chat_params,
             files,
-            session);
+            session,
+            nullptr);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
             body_parsed,
             files,
             TASK_RESPONSE_TYPE_OAI_ASR,
-            session);
+            session,
+            nullptr);
     };
 
     // realtime transcription over websocket, modeled after the OpenAI realtime API
@@ -7184,19 +7218,22 @@ void server_routes::init_routes() {
         SRV_DBG("%s\n", "Request converted: Anthropic -> OpenAI Chat Completions");
         SRV_DBG("converted request: %s\n", body.dump().c_str());
         common_chat_session session;
+        mtmd_helper_init_opt req_init_opt = ctx_server.init_opt;
         json body_parsed = oaicompat_chat_params_parse(
             ctx_server.vocab,
             body,
             meta->chat_params,
             files,
-            session);
+            session,
+            &req_init_opt);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
             body_parsed,
             files,
             TASK_RESPONSE_TYPE_ANTHROPIC,
-            session);
+            session,
+            &req_init_opt);
     };
 
     this->post_anthropic_count_tokens = [this](const server_http_req & req) {

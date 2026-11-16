@@ -1435,7 +1435,12 @@ void handle_media(
     }
 }
 // load media files from an OAI content array, then replace each media part with a media marker text part
-static void oaicompat_content_load_media(json & content, const server_chat_params & opt, std::vector<raw_buffer> & out_files) {
+static void oaicompat_content_load_media(json & content, const server_chat_params & opt, std::vector<raw_buffer> & out_files,
+                                         mtmd_helper_init_opt * req_init_opt = nullptr) {
+    // per-request "first video item that overrides wins" flag; the init_opt is
+    // pre-seeded with the server-global defaults (fps_target defaults to 4.0), so
+    // we must NOT use the value itself as the "already overwritten" sentinel.
+    bool request_override_applied = false;
     for (auto & p : content) {
         std::string type = json_value(p, "type", std::string());
         if (type == "image_url") {
@@ -1477,6 +1482,45 @@ static void oaicompat_content_load_media(json & content, const server_chat_param
                                     json_value(input_video, "url", std::string()));
             handle_media(out_files, url, opt.media_path);
 
+            // Per-request video sampling override, mirroring tokenize_oai_content_array().
+            // The overrides may live on the item itself ({type:"input_video", fps, max_frames,
+            // input_video:{...}}) or nested inside the video object ({video_url:{url, fps,
+            // max_frames}}). The first video item that specifies them wins for the whole request;
+            // when absent, the caller keeps the server-global --video-fps / --video-max-frames.
+            if (req_init_opt) {
+                const json video_obj = p.contains(type)
+                    ? json_value(p, type, json::object())
+                    : (p.contains("video_url") ? json_value(p, "video_url", json::object()) : p);
+                float fps = 0.0f;
+                int32_t max_frames = 0;
+                if (video_obj.contains("fps")) {
+                    fps = video_obj.value("fps", 0.0f);
+                    if (!(fps > 0.0f)) {
+                        throw std::invalid_argument("input_video.fps must be a positive number");
+                    }
+                } else if (p.contains("fps") && json_value(p, "fps", 0.0f) > 0.0f) {
+                    fps = p.value("fps", 0.0f);
+                }
+                if (video_obj.contains("max_frames")) {
+                    max_frames = video_obj.value("max_frames", 0);
+                    if (max_frames <= 0) {
+                        throw std::invalid_argument("input_video.max_frames must be a positive integer");
+                    }
+                } else if (p.contains("max_frames") && json_value(p, "max_frames", 0) > 0) {
+                    max_frames = p.value("max_frames", 0);
+                }
+                if (fps > 0.0f || max_frames > 0) {
+                    if (!request_override_applied) {
+                        // first video item to specify an override wins; the fields
+                        // left unset keep the server-global defaults
+                        if (fps > 0.0f)     { req_init_opt->video_params.fps_target = fps; }
+                        if (max_frames > 0) { req_init_opt->video_params.max_frames = max_frames; }
+                        request_override_applied = true;
+                        LOG_DBG("per-request video override parsed: fps=%g max_frames=%d\n", fps, max_frames);
+                    }
+                }
+            }
+
             p["type"] = "media_marker";
             p["text"] = get_media_marker();
             p.erase("input_video");
@@ -1493,6 +1537,63 @@ server_tokens tokenize_oai_content_array(const llama_vocab * vocab, mtmd_context
         throw std::invalid_argument("\"content\" must be an array");
     }
 
+    // Per-request video override: an optional "fps" / "max_frames" on any
+    // input_video / video_url content item overrides the server-global
+    // --video-fps / --video-max-frames for this request. A plain-text call
+    // leaves the global defaults in place. The item shape is:
+    //   { "type": "input_video", "video_url": { "url": "...", "fps": 8, "max_frames": 200 } }
+    // "fps" / "max_frames" are honoured inside the video object (and, as a
+    // convenience, on the item itself). They are validated against the loaded
+    // model's processor cap by mtmd_get_video_config() (LFM3-VL 768 / Omni 384).
+    mtmd_helper_init_opt local_opt = init_opt;
+    const mtmd_helper_init_opt * use_opt = &init_opt;
+    bool has_video_override = false;
+    for (const auto & p : content) {
+        if (!p.is_object()) {
+            continue;
+        }
+        const std::string type = json_value(p, "type", std::string());
+        if (type != "input_video" && type != "video_url") {
+            continue;
+        }
+        // The video payload always lives under the "video_url" key (OpenAI
+        // convention) regardless of whether the item type is "input_video" or
+        // "video_url"; a bare item-level dict is accepted as a fallback.
+        const json video_obj = p.contains("video_url")
+            ? json_value(p, "video_url", json::object())
+            : p;
+        float fps = 0.0f;
+        int32_t max_frames = 0;
+        if (video_obj.contains("fps")) {
+            fps = video_obj.value("fps", 0.0f);
+            if (!(fps > 0.0f)) {
+                throw std::invalid_argument("input_video.fps must be a positive number");
+            }
+        } else if (p.contains("fps")) {
+            fps = p.value("fps", 0.0f);
+        }
+        if (video_obj.contains("max_frames")) {
+            max_frames = video_obj.value("max_frames", 0);
+            if (max_frames <= 0) {
+                throw std::invalid_argument("input_video.max_frames must be a positive integer");
+            }
+        } else if (p.contains("max_frames")) {
+            max_frames = p.value("max_frames", 0);
+        }
+        if (fps > 0.0f) {
+            local_opt.video_params.fps_target = fps;
+            has_video_override = true;
+        }
+        if (max_frames > 0) {
+            local_opt.video_params.max_frames = max_frames;
+            has_video_override = true;
+        }
+        break; // one override per request; applies to all files in this request
+    }
+    if (has_video_override) {
+        use_opt = &local_opt;
+    }
+
     std::vector<raw_buffer> files;
     oaicompat_content_load_media(content, opt, files);
 
@@ -1505,7 +1606,7 @@ server_tokens tokenize_oai_content_array(const llama_vocab * vocab, mtmd_context
         return server_tokens(common_tokenize(vocab, prompt, add_special, parse_special), false);
     }
 
-    return process_mtmd_prompt(mctx, prompt, files, init_opt);
+    return process_mtmd_prompt(mctx, prompt, files, *use_opt);
 }
 
 // used by /chat/completions endpoint
@@ -1514,7 +1615,8 @@ json oaicompat_chat_params_parse(
     json & body, /* openai api json semantics */
     const server_chat_params & opt,
     std::vector<raw_buffer> & out_files,
-    common_chat_session & out_session)
+    common_chat_session & out_session,
+    mtmd_helper_init_opt * req_init_opt)
 {
     json llama_params;
 
@@ -1596,7 +1698,7 @@ json oaicompat_chat_params_parse(
             throw std::invalid_argument("Expected 'content' to be a string or an array");
         }
 
-        oaicompat_content_load_media(content, opt, out_files);
+        oaicompat_content_load_media(content, opt, out_files, req_init_opt);
     }
 
     auto caps = common_chat_templates_get_caps(opt.tmpls.get());

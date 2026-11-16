@@ -541,6 +541,7 @@ struct mtmd_helper_video {
     std::string ffmpeg_bin;
     std::string ffprobe_bin;
     float fps_target = 0.0f;
+    int32_t max_frames = 0; // LFM3 max-frame cap override; 0 = the model's default
     mtmd_helper_video_info info = {};
     std::string id; // hash of the input video
 
@@ -726,10 +727,18 @@ struct mtmd_helper_video {
         if (duration < 0.0f && n_frames_orig > 0) {
             duration = (float)n_frames_orig / orig_fps;
         }
+        // ffprobe frequently reports nb_frames=N/A for mpeg/other containers and for
+        // remuxed/re-encoded files. mtmd_get_video_config bails when src_n_frames<=0,
+        // which silently disabled the per-request fps/max_frames override (target_frames
+        // then fell back to duration*fps and every max_frames produced the same frame
+        // set). Derive the frame count from duration when the stream header omits it.
+        if (n_frames_orig <= 0 && duration > 0.0f && orig_fps > 0.0f) {
+            n_frames_orig = (int32_t)(duration * orig_fps + 0.5f);
+        }
 
-        mtmd_video_config cfg{MTMD_VIDEO_TEMPLATE_DEFAULT, 0.0f, 0, 0, 0};
+        mtmd_video_config cfg{MTMD_VIDEO_TEMPLATE_DEFAULT, 0.0f, 0, 0, 0, 0};
         if (use_video_config) {
-            cfg  = mtmd_get_video_config(mctx, width, height, n_frames_orig, orig_fps);
+            cfg  = mtmd_get_video_config(mctx, width, height, n_frames_orig, orig_fps, max_frames);
             tmpl = cfg.tmpl;
         }
 
@@ -1103,6 +1112,7 @@ mtmd_helper_video_init_params mtmd_helper_video_init_params_default() {
         /* ffmpeg_bin_dir         */ nullptr,
         /* timestamp_interval_ms  */ 5000,
         /* no_soundtrack          */ false,
+        /* max_frames             */ 0,
     };
 }
 
@@ -1177,6 +1187,7 @@ mtmd_helper_video * mtmd_helper_video_init(
     ctx->ffprobe_bin          = video_resolve_bin(params.ffmpeg_bin_dir, "ffprobe");
     ctx->timestamp_interval_ms = params.timestamp_interval_ms;
     ctx->use_video_config      = true;
+    ctx->max_frames            = params.max_frames;
 
     if (!ctx->probe(params.fps_target)) {
         LOG_ERR("%s: ffprobe failed for '%s' (is ffprobe in PATH?)\n", __func__, path);
@@ -1216,6 +1227,7 @@ mtmd_helper_video * mtmd_helper_video_init_from_buf(
     ctx->ffprobe_bin           = video_resolve_bin(params.ffmpeg_bin_dir, "ffprobe");
     ctx->timestamp_interval_ms = params.timestamp_interval_ms;
     ctx->use_video_config      = true;
+    ctx->max_frames            = params.max_frames;
 
     if (!ctx->probe(params.fps_target)) {
         LOG_ERR("%s: ffprobe failed on buffer (is ffprobe in PATH?)\n", __func__);

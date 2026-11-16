@@ -2955,25 +2955,52 @@ int mtmd_get_audio_sample_rate(const mtmd_context * ctx) {
 
 mtmd_video_config mtmd_get_video_config(const mtmd_context * ctx,
                                         int32_t src_width, int32_t src_height,
-                                        int32_t src_n_frames, float src_fps) {
-    mtmd_video_config cfg{MTMD_VIDEO_TEMPLATE_DEFAULT, 0.0f, 0, 0, 0};
-    if (!ctx->ctx_v || clip_get_projector_type(ctx->ctx_v) != PROJECTOR_TYPE_LFM3VL) {
+                                        int32_t src_n_frames, float src_fps,
+                                        int32_t max_frames) {
+    mtmd_video_config cfg{MTMD_VIDEO_TEMPLATE_DEFAULT, 0.0f, 0, 0, 0, 0};
+    if (!ctx->ctx_v) {
+        return cfg;
+    }
+    // The LFM3 family has TWO projector types: LFM3VL (vision-language, lfm3-2b-vl)
+    // and LFM3A (audiovisual, LFM3-Omni). Both support max-frame / adaptive-fps video
+    // sampling. The old gate only accepted LFM3VL, which silently disabled the whole
+    // adaptive path for LFM3-Omni (fps/max_frames were ignored and the engine fed every
+    // source frame). Accept both; `omni` (line ~2971) then picks the right template + cap.
+    const projector_type proj = clip_get_projector_type(ctx->ctx_v);
+    if (proj != PROJECTOR_TYPE_LFM3VL && proj != PROJECTOR_TYPE_LFM3A) {
         return cfg;
     }
 
-    // matches Lfm3VlVideoProcessor: 2 fps sampling with a [4, 768] frame clamp
-    // LFM3-Omni samples at most 384 frames and hears the soundtrack
+    // Max-frame-driven policy for the LFM3 family (reference caps from conversion/lfm3.py:
+    // LFM3-VL max_frames=768, LFM3-Omni max_frames=384). The old path hardcoded 2 fps with a
+    // [4, cap] clamp, so a 60 s / 60 fps ring only sampled 120 frames — far under neither cap.
+    // Now we sample up to the processor cap and derive the effective fps from the selected
+    // count, matching the LFM3-Omni max-frame handoff (384 default). LFM3-VL (the model in use,
+    // e.g. lfm3-2b-vl) gets the same benefit up to its 768-frame cap.
     const bool omni = ctx->video_has_soundtrack();
     cfg.tmpl = omni ? MTMD_VIDEO_TEMPLATE_LFM3_OMNI : MTMD_VIDEO_TEMPLATE_LFM3;
-    cfg.fps  = 2.0f;
+    cfg.fps  = 0.0f;
     if (src_n_frames <= 0 || src_fps <= 0.0f) {
         return cfg;
     }
 
-    int32_t n = (int32_t)((double) src_n_frames / src_fps * cfg.fps);
-    n = std::clamp(n, 4, omni ? 384 : 768);
-    n = std::min(n, src_n_frames);
+    // LFM3 processor max frames: 768 (VL) / 384 (Omni). The model's cap is the hard upper
+    // bound for this loaded model; it also becomes the default when max_frames is omitted.
+    // Any per-request/transport max_frames override is clamped to the model's cap so a
+    // request can never ask the processor to sample more frames than the model accepts
+    // (the LFM3 max-frame handoff passes 384 for the LFM3-Omni / VL processor max).
+    const int32_t MODEL_MAX_FRAMES = omni ? 384 : 768;
+    const int32_t MAX_FRAMES =
+        max_frames > 0 ? std::min(max_frames, MODEL_MAX_FRAMES) : MODEL_MAX_FRAMES;
+    int32_t n = std::min(src_n_frames, MAX_FRAMES);
+    if (n < 4) {
+        n = std::min(src_n_frames, 4);
+    }
+    cfg.max_frames = MODEL_MAX_FRAMES;
     cfg.n_frames = n;
+    // effective fps over the source span: N / (src_n_frames / src_fps)
+    // e.g. 3600 src @ 60fps, N=768 -> 12.8fps (VL); N=384 -> 6.4fps (Omni)
+    cfg.fps = (float) (((double) n * src_fps) / (double) src_n_frames);
 
     clip_image_size size;
     if (ctx->image_preproc && ctx->image_preproc->get_video_frame_size(n, src_width, src_height, size)) {
