@@ -3013,6 +3013,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples(mmproj_examples).set_env("LLAMA_ARG_VIDEO_FPS"));
     add_opt(common_arg(
+        {"--video-max-frames"}, "N",
+        string_format("LFM3 video max-frame cap; 0 = the model's default (LFM3-VL 768, LFM3-Omni 384). "
+                      "384 matches the LFM3-Omni max-frame handoff (default: %d)", params.video_max_frames),
+        [](common_params & params, int value) {
+            params.video_max_frames = value;
+        }
+    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_VIDEO_MAX_FRAMES"));
+    add_opt(common_arg(
         {"--video-timestamp-interval"}, "N",
         string_format("interval in milliseconds between text timestamps (default: %" PRId64 ")", params.video_timestamp_interval_ms),
         [](common_params & params, int value) {
@@ -4070,6 +4078,47 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.models_memory_margin = value;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MODELS_MEMORY_MARGIN"));
+    add_opt(common_arg(
+        {"--beehive"}, {"--no-beehive"},
+        "single-process multi-model inference (beehive) mode. DEFAULT ON. Use "
+        "--no-beehive to run the classic single-model/instance server instead.",
+        [](common_params & params, bool value) {
+            params.bee_enabled = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--beehive-model"}, "id=path[,...]",
+        "register model(s) for beehive mode as id=path; comma-separate for several. All registered models load in-process and share the dedup weight plane.",
+        [](common_params & params, const std::string & value) {
+            // value may be a comma-separated list of id=path pairs
+            size_t start = 0;
+            while (start <= value.size()) {
+                const size_t comma = value.find(',', start);
+                const size_t end   = comma == std::string::npos ? value.size() : comma;
+                const std::string tok = value.substr(start, end - start);
+                if (!tok.empty()) {
+                    params.bee_models.emplace_back(tok);
+                }
+                if (comma == std::string::npos) break;
+                start = comma + 1;
+            }
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--beehive-kvarn-k"}, "N",
+        "KVarN bits for the K half of EVERY beehive model's KV cache (2..8, 0=inherit default F16). "
+        "Reduces KV physical residency 2-8x vs F16 with a normalized KVarN record layout.",
+        [](common_params & params, int value) {
+            params.bee_kvarn_k = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--beehive-kvarn-v"}, "N",
+        "KVarN bits for the V half of EVERY beehive model's KV cache (2..8, 0=inherit default F16).",
+        [](common_params & params, int value) {
+            params.bee_kvarn_v = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--models-autoload"},
         {"--no-models-autoload"},

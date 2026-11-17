@@ -677,6 +677,52 @@ extern "C" {
             const struct llama_model * model,
                         const char * path_model);
 
+    // -------------------------------------------------------------------
+    // EXperimental: BEEHIVE shared-weight dedup shelf (single process,
+    // N model contexts, ONE VRAM plane). Each numerically-identical layer
+    // is materialized once; every model that uses it points to that one
+    // tensor. Non-standard, opt-in, use at your own risk.
+    // -------------------------------------------------------------------
+
+    struct llama_dedup_stats {
+        size_t unique_layers;   // layers resident exactly once
+        size_t total_aliases;   // extra refs that reused a resident layer
+        size_t resident_bytes;  // VRAM bytes actually materialized
+        size_t shape_owners;    // tier-2: unique (shape,type) allocation owners
+        size_t semantic_aliases; // tier-3: dtype-crossing reuses (extra beyond Tier-1)
+    };
+
+    // Get the process-wide dedup registry (lazily created, owns its shelf).
+    LLAMA_API void * llama_dedup_registry_get(void);
+
+    // Current dedup stats (bytes saved = implied by aliases vs unique).
+    LLAMA_API struct llama_dedup_stats llama_dedup_get_stats(void);
+
+    // Manual keys for debugging / inspection. Not required for normal use.
+    LLAMA_API uint64_t llama_dedup_hash_buffer(const void * data, size_t len, uint64_t seed);
+
+    // Tier-3 dtype-faithful fingerprint. Samples the raw GGUF window IN ITS OWN
+    // storage domain (fp16 -> fp16 bits, bf16 -> bf16, Q8_0 -> block values,
+    // F32 -> fp32) so it reproduces what the graph carries for that type — 1:1
+    // parity, no global fp32 upcast. Reported in stats; seed folds in type so
+    // different quants of the same weights never collide.
+    LLAMA_API uint64_t llama_dedup_dtype_fingerprint(
+        const void * data, size_t len, int type, const long long ne[4]);
+
+    // Persistent layer manifest (docker-like delta). Point blobs+index at a dir
+    // and flush after model loads so duplicate layers are shared across processes.
+    LLAMA_API void llama_dedup_manifest_set_dir(const char * dir);
+    LLAMA_API void llama_dedup_manifest_load();
+    LLAMA_API void llama_dedup_manifest_flush();
+    LLAMA_API size_t llama_dedup_manifest_count();
+    // Persist one layer's byte window to the durable blob store (sha256-named).
+    // Returns non-zero on success. Called by the loader on each newly-materialized
+    // unique layer so unchanged layers are never re-fetched across runs. fp is the
+    // Tier-3 native-domain fingerprint (0 = not computed) stored for the lab protocol.
+    LLAMA_API int llama_dedup_manifest_persist(
+        const char * name, int type, const long long ne[4], const void * data, size_t len,
+        uint64_t fp);
+
     DEPRECATED(LLAMA_API void llama_free_model(struct llama_model * model),
             "use llama_model_free instead");
 
@@ -714,6 +760,31 @@ extern "C" {
     LLAMA_API uint32_t llama_n_ubatch   (const struct llama_context * ctx);
     LLAMA_API uint32_t llama_n_seq_max  (const struct llama_context * ctx);
     LLAMA_API uint32_t llama_n_rs_seq   (const struct llama_context * ctx);
+
+    // Real KV-cache memory stats for a context, split into global-attention (full
+    // context) vs SWA (bounded window) components. Returns true when the context
+    // exposes per-cache counters; components are resident bytes (K payload + V
+    // payload + exact tail + overhead) and allocated capacity tokens. Exposed so
+    // beehive's lab-report can report measured per-layer KV residency, not an estimate.
+    struct llama_kv_memory_map {
+        uint64_t global_resident_bytes;
+        uint64_t global_capacity_tokens;
+        uint64_t swa_resident_bytes;
+        uint64_t swa_capacity_tokens;
+        uint64_t total_resident_bytes;
+    };
+    LLAMA_API bool llama_context_get_kv_memory_map(const struct llama_context * ctx, struct llama_kv_memory_map * out);
+
+    // Aggregate per-buffer-type memory across a context: model bytes, compute
+    // (temporary graph workspace) bytes, and KV/cache bytes. compute is the target
+    // for Tier-2 workspace lifetime reuse. Returns true on success.
+    struct llama_memory_map {
+        uint64_t model_bytes;
+        uint64_t compute_bytes;
+        uint64_t context_bytes;
+        uint64_t total_bytes;
+    };
+    LLAMA_API bool llama_context_get_memory_map(const struct llama_context * ctx, struct llama_memory_map * out);
 
     DEPRECATED(LLAMA_API int32_t llama_n_ctx_train(const struct llama_model * model), "use llama_model_n_ctx_train instead");
     DEPRECATED(LLAMA_API int32_t llama_n_embd     (const struct llama_model * model), "use llama_model_n_embd instead");

@@ -1,0 +1,1009 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>BeeHive Assembly — Wukong Tetris (Showmanship Engine)</title>
+<style>
+  :root {
+    --bg: #05070e;
+    --panel: rgba(13, 20, 38, 0.82);
+    --line: rgba(90, 130, 220, 0.25);
+    --txt: #cfe0ff;
+    --dim: #6b7fb0;
+    --accent: #65e3ff;
+    --omni: #ff5d8f;
+    --brow: #6ea8ff;
+    --abl:  #ffd166;
+    --ok:   #59e390;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--txt);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif; overflow: hidden; }
+  #scene { position: fixed; inset: 0; display: block; }
+
+  /* Top-left title + phase */
+  #stage {
+    position: fixed; top: 18px; left: 18px; z-index: 10; pointer-events: none;
+    text-shadow: 0 2px 12px rgba(0,0,0,0.8);
+  }
+  #stage h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 0.5px; }
+  #stage h1 .halo { color: var(--accent); }
+  #phase { margin-top: 4px; font-size: 13px; color: var(--dim); letter-spacing: 0.4px; }
+  #phase b { color: var(--accent); font-weight: 600; }
+
+  /* Truth panel (bottom-left) */
+  #truth {
+    position: fixed; left: 18px; bottom: 18px; z-index: 10; width: 300px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 14px; backdrop-filter: blur(6px); font-size: 12.5px;
+  }
+  #truth h2 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: 1px;
+    color: var(--dim); }
+  #truth .row { display: flex; justify-content: space-between; padding: 2px 0; }
+  #truth .row .k { color: var(--dim); }
+  #truth .row .v { font-variant-numeric: tabular-nums; }
+  #truth .row .v.ok { color: var(--ok); }
+  #truth .row .v.aliases { color: var(--accent); }
+  #truth hr { border: 0; border-top: 1px solid var(--line); margin: 7px 0; }
+
+  /* Controls (top-right) */
+  #ctrl { position: fixed; top: 18px; right: 18px; z-index: 10; display: flex; gap: 8px; }
+  button {
+    background: var(--panel); color: var(--txt); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 12px; font-size: 12.5px; cursor: pointer;
+    backdrop-filter: blur(6px); transition: border-color .15s, color .15s;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.active { border-color: var(--accent); color: var(--accent); }
+  #toast {
+    position: fixed; left: 50%; top: 26px; transform: translateX(-50%); z-index: 20;
+    background: var(--panel); border: 1px solid var(--line); color: var(--txt);
+    padding: 8px 16px; border-radius: 8px; font-size: 13px; opacity: 0;
+    transition: opacity .3s; pointer-events: none; text-shadow: none;
+  }
+  #toast.show { opacity: 1; }
+
+  /* Legend (bottom-right) */
+  #legend { position: fixed; right: 18px; bottom: 18px; z-index: 10; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; font-size: 12px;
+    backdrop-filter: blur(6px); }
+  #legend .l { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; }
+</style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <div id="stage">
+    <h1>BeeHive Assembly · <span class="halo">Wukong Tetris</span></h1>
+    <div id="phase">phase …</div>
+  </div>
+
+  <div id="toast"></div>
+
+  <div id="ctrl">
+    <button id="btn-cinematic" class="active">Cinematic</button>
+    <button id="btn-xray">Engineering X-Ray</button>
+    <button id="btn-replay">Replay</button>
+  </div>
+
+  <div id="truth">
+    <h2>Truth Engine · Lab Protocol</h2>
+    <div class="row"><span class="k">assembly</span><span class="v" id="t_assembly">–</span></div>
+    <div class="row"><span class="k">unique layers</span><span class="v" id="t_unique">–</span></div>
+    <div class="row"><span class="k">aliases (shared)</span><span class="v aliases" id="t_aliases">–</span></div>
+    <div class="row"><span class="k">resident weights</span><span class="v" id="t_weights">–</span></div>
+    <div class="row"><span class="k">shape groups</span><span class="v" id="t_shapes">–</span></div>
+    <div class="row"><span class="k">physical VRAM</span><span class="v ok" id="t_vram">–</span></div>
+    <hr />
+    <div class="row"><span class="k">KV resident</span><span class="v" id="t_kv">–</span></div>
+    <div class="row"><span class="k">total savings</span><span class="v" id="t_savings">–</span></div>
+  </div>
+
+  <div id="legend">
+    <div class="l"><span class="swatch" style="background:var(--omni)"></span> omn · Omni-2B</div>
+    <div class="l"><span class="swatch" style="background:var(--brow)"></span> brow · VL-BrowserAgent</div>
+    <div class="l"><span class="swatch" style="background:var(--abl)"></span> abl · VL-Abliter8</div>
+    <div class="l"><span class="swatch" style="background:var(--ok)"></span> unique layer</div>
+    <div class="l"><span class="swatch" style="background:rgba(89,227,144,.35)"></span> shared (alias)</div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+    // ------------------------------------------------------------------ data
+    // Mock what POST /v1/beehive/assemblies returns. Tries to fetch the real
+    // JSON file next to this page; falls back to an inline copy so the demo
+    // still runs from file:// when same-origin fetch is blocked.
+    const INLINE = {
+      "schema_version":"1.0","assembly_id":"beeasm-inline-00001",
+      "models":[
+        {"id":"omn","status":"loaded"},{"id":"brow","status":"loaded"},{"id":"abl","status":"loaded"}
+      ],
+      "optimization":{
+        "measurements":{"resident_weight_bytes":5233893632,"resident_weight_gib":4.8744,
+          "nominal_weight_gib":5.16,"unique_layers":726,
+          "total_aliases":853,"shape_groups":11,"semantic_aliases":0,
+          "physical_vram_bytes":6419136512,"physical_vram_gib":5.98},
+        "tiers":{"tier1_byte_dedup":{"unique_layers":726,"aliases":853},
+          "tier2_shape_groups":{"shape_owners":11},
+          "tier3_dtype_faithful":{"fingerprinted_layers":726,"semantic_aliases":0}},
+        "manifest":{"fingerprinted":726},
+        "kv":{"measured_total_resident_bytes":325582848,"measured_total_resident_gib":0.303},
+        "workspace":{"measured_compute_bytes":297567168},
+        "context_capacity":[
+          {"model":"omn","configured_ctx":8192,"supported_ctx":128000},
+          {"model":"brow","configured_ctx":8192,"supported_ctx":128000},
+          {"model":"abl","configured_ctx":8192,"supported_ctx":128000}]
+      },
+      "timeline":[
+        {"t_ms":0,"event":"assembly.start"},
+        {"t_ms":50,"event":"model.loaded","model":"omn"},
+        {"t_ms":50,"event":"model.loaded","model":"brow"},
+        {"t_ms":50,"event":"model.loaded","model":"abl"},
+        {"t_ms":100,"event":"dedup.shelf.finalized"}
+      ],
+      "presentation":{"theme":"wukong-tetris","cinematic_duration_ms":18000,
+        "procedural_interpolation":true,"tagline":"3 models. 1 hive. Zero ketchup."}
+    };
+
+    let report = INLINE;
+    try {
+      const r = await fetch('./mock-lab-report.json', { cache: 'no-store' });
+      if (r.ok) report = await r.json();
+      else console.warn('mock-lab-report.json not reachable, using inline copy');
+    } catch (e) {
+      console.warn('fetch failed (file://?) — using inline copy', e.message);
+    }
+
+    // ------------------------------------------------------------------ scene
+    const M = report.presentation.cinematic_duration_ms || 18000; // 18 s
+    const models = report.models.map(m => m.id);
+    const modelColor = { omn: 0xff5d8f, brow: 0x6ea8ff, abl: 0xffd166 };
+    const tagline = report.presentation.tagline || '';
+
+    const canvas = document.getElementById('scene');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x05070e, 1);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 200);
+    camera.position.set(20, 16, 26);
+
+    const controls = new OrbitControls(camera, canvas);
+    controls.target.set(0, 0, 0);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+
+    // lights — kept subtle so the brick emissive doesn't blow the cube to white
+    scene.add(new THREE.AmbientLight(0x8899cc, 0.6));
+    const key = new THREE.DirectionalLight(0xffffff, 0.85); key.position.set(14, 24, 16); scene.add(key);
+    const rim = new THREE.DirectionalLight(0x65e3ff, 0.4); rim.position.set(-16, 8, -18); scene.add(rim);
+    const fill = new THREE.PointLight(0x8a6bff, 0.3, 60); fill.position.set(0, 14, -6); scene.add(fill);
+
+    // subtle ground grid
+    const grid = new THREE.GridHelper(30, 20, 0x23334f, 0x16233a);
+    grid.position.y = -2; scene.add(grid);
+
+    // ------------------------------------------------------------------ blocks
+    // One TETRIS BRICK per unique layer (not a uniform cube). Bricks are built
+    // from unit cells with one of the classic tetromino shapes, so adjacent
+    // layers sit as readable pieces. Shape + cell count scale with the tensor's
+    // dims aspect; the model's own color is kept on the brick material so the
+    // assembled cube visibly contains all three models (not one swarm color).
+    const blocks = [];          // { pivot, model, baseOrigin, home, shape, cells, … }
+    // One brick per unique layer. Every brick lives under ONE rotating group
+    // ("cube") so a multi-axis Rubik sweep moves the whole field at once.
+
+    // The whole field lives under ONE rotating group ("cube"). Rotating it on
+    // multiple axes sweeps every brick at once — the Rubik's-cube fold motion.
+    // Because it starts at the identity at the origin, brick positions are world
+    // positions until we start turning; the assembled `home` cells are local to it.
+    const cube = new THREE.Group();
+    scene.add(cube);
+
+    // Named tetromino cell layouts (x,y relative to origin cell, z=0 plane).
+    // A layer's brick = this shape extruded to a thin, Tetris-like depth.
+    const TETRIS = {
+      O: [[0,0],[1,0],[0,1],[1,1]],
+      I: [[0,0],[1,0],[2,0],[3,0]],
+      J: [[0,0],[1,0],[2,0],[2,1]],
+      L: [[0,0],[1,0],[2,0],[0,1]],
+      S: [[1,0],[2,0],[0,1],[1,1]],
+      Z: [[0,0],[1,0],[1,1],[2,1]],
+      T: [[0,0],[1,0],[2,0],[1,1]]
+    };
+    const TETRIS_NAMES = Object.keys(TETRIS);
+
+    // deterministic pseudo-random so a loop is self-consistent (no ghosting)
+    function lcg(seed){ let s=seed>>>0; return ()=>{ s=(s*1664525+1013904223)>>>0; return s/4294967296; }; }
+
+    // dims -> one of the tetromino shapes + a unit-cell height scale per layer.
+    function brickFromDims(name, dims) {
+      const parts = String(dims||'').split(',').map(Number).filter(x => x > 0);
+      const deep = parts[0] || 1, wide = parts[1] || 1;
+      // long FFNs / embeddings lean toward I/J/L (stretched); small norms toward O/T.
+      const elongated = wide / Math.max(deep,1) > 4 || deep / Math.max(wide,1) > 4;
+      const shape = elongated ? (deep > wide ? 'I' : 'L') : TETRIS_NAMES[(Math.random()*TETRIS_NAMES.length)|0];
+      const cells = TETRIS[shape];
+      // cell pitch ~ 0.6 world units; thin depth for the "brick" look.
+      const pitch = 0.62;
+      const depth = name.includes('shortconv') || name.includes('norm') ? 0.35 : pitch*0.9;
+      return { shape, cells, pitch, depth };
+    }
+
+    // Fixed spatial sectors: each model gets its own orbit radius + angular
+    // sector so the three swarms stay visually distinct and never overlap into
+    // "one model". Returned fresh each call (never mutated across passes).
+    const SECTOR = {
+      omn:  { ring: 15, baseA: 0.0, spread: 4.0 },          // east  +x
+      brow: { ring: 15, baseA: Math.PI*2/3, spread: 4.0 },  // NW
+      abl:  { ring: 15, baseA: -Math.PI*2/3, spread: 4.0 }  // SW
+    };
+    function spawnFor(mid, i) {
+      const s = SECTOR[mid], rnd = lcg((i+1)*7919);
+      const a = s.baseA + (rnd()-0.5)*s.spread;
+      const r = s.ring + (rnd()-0.5)*3;
+      return new THREE.Vector3(
+        Math.cos(a)*r,
+        (rnd()-0.5)*7,
+        Math.sin(a)*r
+      );
+    }
+
+// How many UNIQUE resident layers each model owns — these three counts sum to
+// the report's `unique_layers` (726). There are NO duplicate bricks: one brick
+// = one layer materialized once in the shelf. The byte-twin ALIASES (853 in the
+// report) are not extra objects — they are other models pointing at the SAME
+// resident layer. So we never draw a second brick for an alias; instead shared
+// layers carry a green merge-ring + tint in the dedup phase to show "this one
+// layer is reused by another model" (savings, not duplication).
+const uniqueTotal = report.optimization.tiers.tier1_byte_dedup.unique_layers; // 726
+const perModel = {
+  omn:  { layers: 240 },             // unique to omn, nothing shared
+  brow: { layers: 260 },             // owns the LFM3-VL base core
+  abl:  { layers: uniqueTotal - 240 - 260 } // remainder; most of these are the
+       // layers abliter8 shares with brow — drawn ONCE, tinted green as shared.
+};
+// sanity: perModel counts must equal the real unique total
+const drawnTotal = Object.values(perModel).reduce((s,c)=>s+c.layers,0);
+
+    const cubeDim = 8;
+    let gridN = 7;                       // recomputed from the shown-block count per mode
+    let slotIndex = 0;
+
+    const sample = report.optimization?.manifest?.sample_layers || [];
+
+    function keyFor(model, layerIdx) {
+      const s = sample[layerIdx % Math.max(sample.length, 1)];
+      const name = s ? s.name : `blk.${layerIdx % 24}.attn_q.weight`;
+      const dims  = s ? s.dims : '2048,2048,1,1';
+      const type_id = s ? s.type_id : 8;
+      return { name, dims, type_id };
+    }
+
+    // single unit cell geometry reused by every brick cell
+    const cellGeo = new THREE.BoxGeometry(1,1,1);
+
+    for (const mid of models) {
+      const cfg = perModel[mid];
+      for (let i = 0; i < cfg.layers; i++) {
+        const { name, dims, type_id } = keyFor(mid, i);
+        const { shape, cells, pitch, depth } = brickFromDims(name, dims);
+
+        const mat = new THREE.MeshStandardMaterial({
+          color: modelColor[mid],
+          emissive: modelColor[mid],
+          emissiveIntensity: 0.18,
+          roughness: 0.5, metalness: 0.2,
+          transparent: true, opacity: 1
+        });
+
+        // tetromino: one box per cell, under a pivot so we can rotate the whole
+        // brick on multiple axes at once (Rubik-like).
+        const pivot = new THREE.Group();
+        for (const [cx, cy] of cells) {
+          const c = new THREE.Mesh(cellGeo, mat);
+          c.position.set(cx*pitch, cy*pitch, 0);
+          pivot.add(c);
+        }
+        pivot.scale.set(1,1,depth/pitch);
+
+        const origin = spawnFor(mid, i);
+        pivot.position.copy(origin);
+        pivot.rotation.set(Math.random()*0.5-0.25, Math.random()*0.5-0.25, (Math.random()-0.5)*0.6);
+
+        // add to the rotating cube group so the Rubik sweep moves every brick
+        cube.add(pivot);
+
+        const rec = {
+          pivot, model: mid,
+          baseOrigin: origin.clone(),      // NEVER mutated
+          home: new THREE.Vector3(0, 0, 0),
+          shape, cells, pitch, depth,
+          name, type_id, dims,
+          // shared = this single layer is ALSO used by another model (an alias
+          // points at it). Always ONE brick; we just tint/highlight it as reused.
+          shared: mid === 'abl' && (i % 100) < 72,
+          sway: Math.random()*Math.PI*2,
+          spinSpeed: 0.4 + Math.random()*0.7
+        };
+        blocks.push(rec);
+      }
+    }
+
+    // Assembly grid slot assigner — one slot per shown brick, so the cube is
+    // filled layer-by-layer (matching the timeline) with brick-sized spacing.
+    function nextSlot() {
+      const gi = slotIndex++;
+      const iz = Math.floor(gi / (gridN*gridN));
+      const rem = gi % (gridN*gridN);
+      const iy = Math.floor(rem / gridN);
+      const ix = rem % gridN;
+      const s = cubeDim / gridN;
+      const z = iz - gridN/2 + 0.5, y = iy - gridN/2 + 0.5, x = ix - gridN/2 + 0.5;
+      return new THREE.Vector3(x*s, y*s, z*s);
+    }
+
+    // ------------------------------------------------------------------ stats
+    function fmtGiB(b){ return (b/1073741824).toFixed(2)+' GiB'; }
+    const opt = report.optimization;
+    const meas = opt.measurements;
+    const kv = opt.kv || {};
+    const set = (id,v)=> document.getElementById(id).textContent = v;
+    set('t_assembly', report.assembly_id);
+    set('t_unique', meas.unique_layers);
+    set('t_aliases', meas.total_aliases);
+    set('t_weights', fmtGiB(meas.resident_weight_bytes));
+    set('t_shapes', meas.shape_groups);
+    set('t_vram', meas.physical_vram_gib ? meas.physical_vram_gib.toFixed(2)+' GiB' : '—');
+    set('t_kv', kv.measured_total_resident_gib ? kv.measured_total_resident_gib.toFixed(2)+' GiB' : '—');
+    // Tier-1 saving vs the nominal (unde-duplicated) weight footprint, exactly as
+    // measured in beehive_lab_protocol.md §1: nominal 5.16 GiB -> resident 4.87 GiB.
+    const nominalGib = meas.nominal_weight_gib || 5.16;
+    const residentGib = meas.resident_weight_gib || (meas.resident_weight_bytes/1073741824);
+    const savedGib = nominalGib - residentGib;
+    const pct = nominalGib > 0 ? (savedGib/nominalGib*100) : 0;
+    set('t_savings', pct.toFixed(1)+'% ('+savedGib.toFixed(3)+' GiB Tier-1)');
+
+    // ------------------------------------------------------------------ phase
+    const phaseEl = document.getElementById('phase');
+    const toastEl = document.getElementById('toast');
+    let toastTimer = null;
+    function toast(t){ toastEl.textContent = t; toastEl.classList.add('show');
+      clearTimeout(toastTimer); toastTimer = setTimeout(()=>toastEl.classList.remove('show'), 1800); }
+    let standalone = 'Cinematic';
+
+    // ------------------------------------------------------------------ master timeline (0..1 across the full cinematic)
+    // documented choreography over 18 s:
+    //   0.00-0.22  arrival   (0-4s)   swarms drift in as distinct clouds
+    //   0.22-0.56  dedup     (4-10s)  byte-twin blocks merge -> one shared block
+    //   0.56-0.78  assembly  (10-14s) survivors fly into the cube layer-by-layer
+    //   0.78-1.00  seal      (14-18s) cube completes, tagline + id render
+    const PH = { arrival:[0.00,0.22], dedup:[0.22,0.56], assemble:[0.56,0.78], seal:[0.78,1.00] };
+
+    let animT = 0;            // normalized cinematic progress 0..1
+    let playing = true;
+
+    // A `shared` layer is ONE resident brick that another model also points at
+// (an alias). It is never duplicated and never hidden — it just gets a green
+// merge-highlight to mark "this single layer is reused". 726 unique bricks
+// total; the 853 aliases are invisible savings, not extra objects.
+function isShared(rec){ return rec.shared; }
+
+function setPhase(name){ phaseEl.innerHTML = 'phase <b>'+name+'</b>'; }
+
+function easeInOut(t){ return t<0.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2; }
+function clamp01(t){ return Math.max(0, Math.min(1, t)); }
+
+function assignHomes() {
+  // EVERY unique brick gets a home — there are no duplicate/secondary bricks,
+  // so nothing is left out. Cube is sized to hold all 726 (9x9x9 = 729).
+  const shown = blocks.length;
+  gridN = Math.max(3, Math.ceil(Math.cbrt(shown)));
+  slotIndex = 0;
+  for (const rec of blocks) { rec.home = nextSlot(); }
+}
+
+    // ------------------------------------------------------------------ animation loop
+    function update(tNow) {
+      const p = animT; // global progress 0..1
+
+      let phaseName = 'seal';
+      if (p < PH.arrival[1]) phaseName = 'arrival';
+      else if (p < PH.dedup[1]) phaseName = 'dedup (folding tetris)';
+      else if (p < PH.assemble[1]) phaseName = 'assembly';
+      setPhase(phaseName);
+
+      // Rubik-style cube orientation: sweep on multiple axes during assembly,
+      // gentle continuous tumble once sealed (and a little already in dedup so
+      // the swarms feel like they're being folded toward a turning core).
+      // Always reset each frame so a stale angle from a previous pass (arrival
+      // at p=0) can never leave the swarms visually rotated/ghosted.
+      cube.rotation.set(0, 0, 0);
+      if (p >= PH.dedup[0]) {
+        const dp = clamp01((p-PH.dedup[0])/(PH.dedup[1]-PH.dedup[0]));
+        cube.rotation.x = 0.5*Math.sin(dp*Math.PI);
+        cube.rotation.y = 0.9*Math.sin(dp*Math.PI + 0.6);
+      }
+      if (p >= PH.assemble[0]) {
+        const ap = (p-PH.assemble[0])/(PH.assemble[1]-PH.assemble[0]);
+        // rotate the half-built cube in on itself — layers visibly sweep
+        cube.rotation.x = -0.6*Math.sin(ap*Math.PI*1.5);
+        cube.rotation.z =  0.5*Math.sin(ap*Math.PI*1.5 + 0.4);
+      }
+      if (p >= PH.seal[0]) {
+        const s = (p-PH.seal[0])/(PH.seal[1]-PH.seal[0]);
+        cube.rotation.x = 0.35 + s*0.7*Math.sin(tNow*0.0005);
+        cube.rotation.y = 0.2 + s*1.1*Math.sin(tNow*0.00042 + 1.2);
+        cube.rotation.z = s*0.4*Math.sin(tNow*0.00033);
+      }
+
+      for (const rec of blocks) {
+        const M = rec.pivot;
+        let scale = 1;
+        let opacity = 1;
+        let emissive = 0.18;
+        const mat0 = M.children[0].material;
+
+        // ---- arrival: each brick drifts inside its OWN sector --------------
+        if (p >= PH.arrival[0] && p < PH.arrival[1]) {
+          const lp = (p - PH.arrival[0]) / (PH.arrival[1]-PH.arrival[0]);
+          // fresh pass -> back to the layer's own model color, never a leftover tint
+          mat0.color.set(modelColor[rec.model]);
+          mat0.emissive.set(modelColor[rec.model]);
+          // fly from a slightly wider radius in to the baseOrigin, with a bob
+          const r = 1 - 0.3*easeInOut(lp);
+          const bobY = Math.sin(tNow*0.0004 + rec.sway)*0.5;
+          M.position.set(
+            rec.baseOrigin.x * r,
+            rec.baseOrigin.y + bobY,
+            rec.baseOrigin.z * r
+          );
+          // slow tumble so the tetromino reads as a 3D brick, not a flat tile
+          M.rotation.x = Math.sin(tNow*0.0006 + rec.sway)*rec.spinSpeed;
+          M.rotation.y = Math.cos(tNow*0.0007 + rec.sway)*rec.spinSpeed;
+        }
+
+        // ---- dedup: layers that are reused (aliases point here) get a green
+        //      merge-pulse. No brick disappears — they just show as shared. ----
+        else if (p >= PH.dedup[0] && p < PH.dedup[1]) {
+          const lp = (p - PH.dedup[0]) / (PH.dedup[1]-PH.dedup[0]);
+          const bobY = Math.sin(tNow*0.0004 + rec.sway)*0.5;
+          M.position.set(rec.baseOrigin.x, rec.baseOrigin.y + bobY, rec.baseOrigin.z);
+          M.rotation.y += 0.004 + Math.sin(rec.sway)*0.002;
+          if (isShared(rec)) {
+            // single reused layer ~ green merge-ring flash (the alias savings)
+            const fl = clamp01(1 - Math.abs(lp*2 - 1));        // 0..1..0 pulse
+            mat0.color.set('#59e390');
+            mat0.emissive.set('#59e390');
+            emissive = 0.35 + 0.3*fl;
+            opacity = 0.9;
+            M.scale.setScalar(1 + 0.35*fl);                    // brief "merge" swell
+          }
+        }
+
+        // ---- assembly: every brick flies to its grid cell ----------------
+        else if (p >= PH.assemble[0] && p < PH.assemble[1]) {
+          const lp = (p - PH.assemble[0]) / (PH.assemble[1]-PH.assemble[0]);
+          const slot = rec.home;
+          const trav = easeInOut(clamp01(lp*1.2 + rec.sway*0.02));
+          M.position.lerpVectors(rec.baseOrigin, slot, trav);
+          // seat flat: kill the tumble as it nears its grid cell
+          const settle = clamp01(trav*2 - 0.6);
+          M.rotation.x = (1-settle)*M.rotation.x;
+          M.rotation.y = (1-settle)*M.rotation.y;
+          scale = 1 - 0.15*trav;
+          if (isShared(rec)) {
+            // keep a faint green mark so shared layers stay readable in the cube
+            mat0.color.set('#9fe3ae');
+            mat0.emissive.set('#59e390'); emissive = 0.35;
+          }
+        }
+
+        // ---- seal: cube assembled — hold, pulse, keep Rubik orientation ----
+        else {
+          M.position.copy(rec.home);        // cube group already rotates
+          M.rotation.x = 0; M.rotation.y = 0; M.rotation.z = 0;
+          scale = 1 - 0.15;
+          if (isShared(rec)) { mat0.color.set('#9fe3ae'); mat0.emissive.set('#59e390'); }
+          const lp = (p - PH.seal[0]) / (PH.seal[1]-PH.seal[0]);
+          const pulse = isShared(rec) ? 0.5 : (0.5 + 0.3*Math.sin(tNow*0.002));
+          emissive = standalone==='X-Ray' ? 0.3 : (lp>0.25 ? 0.18 : pulse);
+        }
+
+        M.scale.set(scale, scale, scale);
+        const mat = M.children[0].material;
+        mat.opacity = opacity; mat.transparent = true;
+        mat.emissiveIntensity = emissive;
+        M.visible = mat.opacity >= 0.01;
+      }
+
+      // seal overlay text
+      if (p >= PH.seal[0]) {
+        const s = clamp01((p-PH.seal[0])/(PH.seal[1]-PH.seal[0]));
+        if (s > 0.3) showSeal(s);
+      } else hideSeal();
+    }
+
+    // ------------------------------------------------------------------ seal text (DOM)
+    const sealEl = document.createElement('div');
+    sealEl.id = 'seal-text';
+    Object.assign(sealEl.style, {
+      position:'fixed', left:'50%', top:'57%', transform:'translate(-50%,-50%)',
+      textAlign:'center', zIndex:12, pointerEvents:'none', color:'#fff',
+      fontFamily:'"Segoe UI", system-ui', opacity:0, transition:'opacity .6s',
+      textShadow:'0 4px 24px rgba(0,0,0,.9)'
+    });
+    sealEl.innerHTML = '<div style="font-size:30px;font-weight:700;letter-spacing:1px">'
+      + tagline + '</div>'
+      + '<div style="font-size:13px;color:#8fa8d6;margin-top:8px;font-family:monospace">'
+      + report.assembly_id + '</div>';
+    document.body.appendChild(sealEl);
+    function showSeal(s){ sealEl.style.opacity = s>0.85?1:s*2; }
+    function hideSeal(){ sealEl.style.opacity = 0; }
+
+    // ------------------------------------------------------------------ WUKONG
+    // The rigged FBX (royalty-free BMW/Wukong model). Loaded progressively so the
+    // cube animation runs even if the 24 MB FBX is slow or fails. When ready he
+    // spawns from the LEFT, plays his own baked skeletal animation, and performs
+    // a "Jedi" orbit-spin around the assembled cube ("stick + rotation on cube").
+    const WUKONG = {
+      group: null, mixer: null, clips: [], ready: false, failed: false,
+      staff: null,        // staff/weapon sub-mesh (Torus.002) for the flourish
+      handBone: null,     // the hand/wrist bone the staff is parented to (if found)
+      orbitRig: null,     // parent group we rotate around the cube's Y for the orbit state
+      state: 'enter',     // behavioral FSM: 'enter' → 'idle' → 'orbit'
+      stateT: 0,          // seconds spent in the current state
+      targetDir: 1,       // orbit direction
+      spawnT: 1,          // 0..1 "entering from left"
+      actions: {},        // name → AnimationAction for state-machine transitions
+    };
+
+    function setWukongStatus(msg){
+      let el = document.getElementById('wukong-status');
+      if (!el){ el = document.createElement('div'); el.id='wukong-status';
+        Object.assign(el.style,{ position:'fixed', bottom:'18px', left:'50%', transform:'translateX(-50%)',
+          zIndex:15, fontSize:'11px', color:'#7a8fc0', fontFamily:'monospace', background:'rgba(13,20,38,.6)',
+          padding:'3px 10px', borderRadius:'6px', border:'1px solid rgba(90,130,220,.2)' });
+        document.body.appendChild(el); }
+      el.textContent = msg;
+    }
+    setWukongStatus('wukong: loading fbx…');
+
+    // material override — the FBX ships no usable textures (C:\ eye maps are
+    // missing), so we bake nice PBR looks per role instead of loading images.
+function wukongMaterial(nameLower){
+      const isWeapon = /torus|retopo_cylinder|weapon/.test(nameLower);   // staff
+      const isArmor  = /armor|hat/.test(nameLower);                     // armor + hat
+      const isHair   = /fur_/.test(nameLower);                          // fur (dark brown)
+      const isTeeth  = /teeth|tongue/.test(nameLower);                  // teeth/tongue
+      const isEye    = /eye/.test(nameLower);                           // eyes
+      const isBody   = /body|cloth|bottle/.test(nameLower);             // robe/cloth (tan)
+      const p = (c,o) => ({ color:c, side:THREE.DoubleSide, ...o });
+      if (isWeapon) return new THREE.MeshStandardMaterial(p(0xe7c05a, { metalness:0.9, roughness:0.28, emissive:0xff9d2e, emissiveIntensity:0.10 })); // gold staff
+      if (isArmor)  return new THREE.MeshStandardMaterial(p(0x8a3b1f, { metalness:0.85, roughness:0.35, emissive:0x5a1600, emissiveIntensity:0.08 })); // dark red armor
+      if (isHair)   return new THREE.MeshStandardMaterial(p(0x2a1c14, { roughness:0.9, metalness:0.0 }));                                            // dark brown fur
+      if (isTeeth)  return new THREE.MeshStandardMaterial(p(0xe8e4d8, { roughness:0.5, metalness:0.05 }));                                           // teeth white
+      if (isEye)    return new THREE.MeshStandardMaterial(p(0x0b0b10, { roughness:0.25, metalness:0.3 }));                                          // dark eyes
+      if (isBody)   return new THREE.MeshStandardMaterial(p(0x9a7b52, { roughness:0.8, metalness:0.0 }));                                            // tan robe/cloth
+      return new THREE.MeshStandardMaterial(p(0x5a4632, { roughness:0.6, metalness:0.1 }));                                                          // default warm brown
+    }
+
+    function setupWukong(loaded){
+      const group = new THREE.Group();
+      group.visible = false;                // shown once we compute scale
+      // Orbit rig: a parent group we rotate around the cube's Y axis in the
+      // 'orbit' state. Rotating a PARENT composes cleanly with the baked clip
+      // (a manual position set on the group fought the rig and flew him off-frame).
+      const orbitRig = new THREE.Group();
+      orbitRig.add(group);
+      scene.add(orbitRig);
+      WUKONG.orbitRig = orbitRig;
+      const bbox = new THREE.Box3().setFromObject(loaded);
+      // center horizontally, stand feet at y=0 (baked pose likely has feet ~0)
+      const size = bbox.getSize(new THREE.Vector3());
+      const ctr  = bbox.getCenter(new THREE.Vector3());
+      loaded.position.x -= ctr.x;
+      loaded.position.z -= ctr.z;
+      loaded.position.y -= bbox.min.y;
+      // scale to match the cube (~8 units): target height near cubeDim
+      const targetH = 7.5;
+      const s = targetH / Math.max(size.y, 0.001);
+      group.scale.set(s, s, s);
+      group.add(loaded);
+
+      // per-mesh material override + find the staff. Each mesh is a SkinnedMesh
+      // driven by the real AnimationMixer clip; keep skinning intact (hand-baking
+      // here collapsed the pose — the staff sub-mesh proves skinned meshes draw).
+      loaded.updateMatrixWorld(true);
+      loaded.traverse(o => {
+        if (o.isMesh){
+          o.visible = true;                 // FBX may ship hidden meshes; force all visible
+          o.material = wukongMaterial((o.name || '').toLowerCase());
+          o.castShadow = false; o.receiveShadow = false;
+          // collect the skeleton so we can refresh bone matrices each frame
+          if (o.isSkinnedMesh && o.skeleton){
+            WUKONG.skeletons = WUKONG.skeletons || [];
+            if (!WUKONG.skeletons.includes(o.skeleton)) WUKONG.skeletons.push(o.skeleton);
+          }
+          // Force full draw range + fresh normals: an FBX geometry loaded with an
+          // empty/stale drawRange or missing normals can silently draw 0 triangles.
+          const geo = o.geometry;
+          if (geo && geo.attributes && geo.attributes.position){
+            geo.setDrawRange(0, Infinity);
+            geo.boundingSphere = null; geo.boundingBox = null;
+            geo.computeVertexNormals();
+            geo.attributes.position.needsUpdate = true;
+            if (geo.attributes.normal) geo.attributes.normal.needsUpdate = true;
+            if (geo.attributes.uv) geo.attributes.uv.needsUpdate = true;
+          }
+          if (/torus|weapon|retopo_cylinder/.test((o.name||'').toLowerCase())){
+            WUKONG.staff = o;
+          }
+        }
+      });
+
+      // real FBX animations. Query toggles for diagnosis:
+      //   ?norig=1 → no clip at all (bind pose, shows a correct standing Wukong)
+      //   ?clip=0  → force clip[0] (rig|BézierCircleAction — this clip collapses the
+      //              body: staff only on reload; prefer clip[1] as the default)
+      //   ?clip=2  → clip index 2 if present
+      WUKONG.mixer = new THREE.AnimationMixer(loaded);
+      const clipNames = loaded.animations.map(c => c.name);
+      WUKONG.clips = loaded.animations;
+      // short diagnostic summary of each clip (duration + what it drives)
+      WUKONG.clipInfo = loaded.animations.map(c => {
+        const tracks = c.tracks || [];
+        // classify track targets
+        const t = {};
+        for (const tr of tracks){
+          const name = tr.name || '';
+          const m = name.match(/\.([a-z]+)$/i);
+          const prop = m ? m[1] : name;
+          t[prop] = (t[prop]||0) + 1;
+        }
+        return c.name + '[' + (c.duration||0).toFixed(2) + 's: ' +
+          Object.entries(t).map(([k,v])=>k+'x'+v).join(',') + ']';
+      }).join(' | ');
+      const q = new URLSearchParams(location.search);
+      // build a playback action for EVERY clip so the FSM can crossfade between them
+      for (const c of loaded.animations){
+        try { WUKONG.actions[c.name] = WUKONG.mixer.clipAction(c); } catch(e){}
+      }
+      if (loaded.animations.length && !q.has('norig')){
+        // Default active clip for the enter/idle states. The FSM picks the action
+        // by name (rigAction.002 = "idle-ish", BézierCircleAction = "spin") and
+        // crossfades between them on state transitions.
+        const idleIdx = loaded.animations.findIndex(c => /rigAction\.(002|002)$/i.test(c.name));
+        const spinIdx = loaded.animations.findIndex(c => /BézierCircleAction/i.test(c.name));
+        let playName = idleIdx >= 0 ? loaded.animations[idleIdx].name
+                       : (spinIdx >= 0 ? loaded.animations[spinIdx].name : loaded.animations[0].name);
+        if (q.has('clip')){
+          const ci = Math.min(parseInt(q.get('clip'),10)||0, loaded.animations.length-1);
+          playName = loaded.animations[ci].name;
+        }
+        WUKONG.activeClip = playName;
+        if (WUKONG.actions[playName]){
+          const action = WUKONG.actions[playName];
+          action.reset();
+          action.setLoop(THREE.LoopRepeat, Infinity);
+          action.clampWhenFinished = false;
+          action.play();
+        }
+        WUKONG.idleActionName = idleIdx >= 0 ? loaded.animations[idleIdx].name : playName;
+
+        // ---- frame-0 warm-up: SkinnedMeshes can be invisible on the FIRST pass
+        // because the GPU bone-matrix texture isn't populated / the skinned shader
+        // isn't compiled until after the first render. Force both now so pass #1
+        // draws (the "appears only on the second loop" symptom).
+        try {
+          WUKONG.mixer.update(0.016);                    // step to a real frame pose
+          loaded.updateMatrixWorld(true);
+          if (WUKONG.skeletons) for (const sk of WUKONG.skeletons) sk.update();
+          if (typeof renderer.compile === 'function') renderer.compile(scene, camera);
+        } catch(e){ console.warn('[wukong] warm-up failed', e); }
+      } else {
+        WUKONG.activeClip = '(bind pose — no clip)';
+      }
+
+      WUKONG.group = group;
+      WUKONG.ready = true;
+
+      // STAFF → HAND joint attachment. Parent the staff mesh into the hand/wrist
+      // bone so the staff inherits the animated joint transform (no manual world
+      // orbit; the hand bone carries it). If a suitable bone is found, use it;
+      // otherwise leave the staff as the independent spin (current behaviour).
+      if (WUKONG.staff){
+        let hand = null;
+        let arms = [];
+        // collect all bones, pick the best hand-like one (right hand preferred).
+        loaded.traverse(o => {
+          if (o.isBone && /hand|wrist|palm|weapon|staff/.test(o.name)) arms.push(o);
+        });
+        if (arms.length){
+          // prefer one whose name hints right/active, else the first
+          const rh = arms.filter(n => /right|\br\b|_r/i.test(n.name));
+          hand = (rh.length? rh : arms)[0];
+        }
+        if (hand){
+          // THREE r150+ has Object3D.attach(): re-parents preserving world transform
+          // and correcting for scale automatically. Use it; fall back if absent.
+          group.updateMatrixWorld(true);          // current world matrices for all
+          try {
+            if (typeof hand.attach === 'function'){
+              hand.attach(WUKONG.staff);
+            } else {
+              // manual equivalent — capture world vars, then reconstitute locally
+              const wv = new THREE.Vector3(), wq = new THREE.Quaternion(), ws1 = new THREE.Vector3(), ws2 = new THREE.Vector3();
+              WUKONG.staff.getWorldPosition(wv); WUKONG.staff.getWorldQuaternion(wq); WUKONG.staff.getWorldScale(ws1);
+              WUKONG.staff.parent.remove(WUKONG.staff);
+              hand.add(WUKONG.staff);
+              // local = worldTransform * (handWorld.Inverse) → decompose
+              const hw = hand.getWorldPosition(new THREE.Vector3());
+              const hq = hand.getWorldQuaternion(new THREE.Quaternion());
+              hand.getWorldScale(ws2);
+              WUKONG.staff.position.subVectors(wv, hw).divide(ws2);
+              WUKONG.staff.quaternion.copy(wq).premultiply(hq.clone().invert());
+            }
+          } catch(e){ console.warn('[wukong] staff attach failed', e); }
+          WUKONG.staff.updateMatrixWorld(true);
+          WUKONG.handBone = hand;
+        }
+      }
+
+      // start offscreen to the LEFT, just outside the view cone
+      group.position.set(-24, 0, 0);
+      WUKONG.spawnT = 0;
+      // ---- DIAGNOSTIC dump (once): dedupe bone names, key still/side, + the staff
+      // offset relative to whichever hand bone it currently sits under. This reveals
+      // the rig's actual pose and the right joint to hold the staff ("see the joints").
+      (function(){
+        try {
+          loaded.updateMatrixWorld(true);
+          const seen = new Set(); const rows = [];
+          loaded.traverse(o => { if (o.isBone && !seen.has(o.name)) { seen.add(o.name);
+            const w = new THREE.Vector3(); o.getWorldPosition(w);
+            rows.push(o.name + '@' + w.toArray().map(v=>v.toFixed(1)).join(','));
+          }});
+          const key = rows.filter(r => /DEF-(root|spine|chest|torso|pelvis|hips?|thigh|shoulder|hand|upper_arm)/i.test(r));
+          // staff offset under its current (hand) parent
+          let staffOff = '';
+          if (WUKONG.staff){
+            const p = WUKONG.staff.parent;
+            if (p){ staffOff = 'parent=' + p.name + ' local=' + WUKONG.staff.position.toArray().map(v=>v.toFixed(2)).join(','); }
+            else staffOff = 'parent=scene local=' + WUKONG.staff.position.toArray().map(v=>v.toFixed(2)).join(',');
+          }
+          const allKey = rows.slice(0, 200).join(' | ');
+          const story = 'SPINE/ROOT: ' + key.join(' ; ').slice(0,800) + ' || STAFF: ' + staffOff;
+          window.__wuBones = allKey;
+          window.__wuKey = story;
+          setWukongStatus('wukong: ready · diag...');
+        } catch(e){ console.warn('[wukong] diag failed', e); }
+        setWukongStatus('wukong: ready · ' + (clipNames.join(',') || 'no clips'));
+      })();
+      console.log('[wukong] FBX ready · clips=' + clipNames.join(','));
+    }
+
+    // ==========================================================================
+// WUKONG BEHAVIORAL STATE MACHINE (Unity-style "node/state" hierarchy)
+//   'enter'  → slide in from the left, short pose-up.
+//   'idle'   → root into the assembled cube's front-left, body loops an idle
+//              clip, staff twirls in the hand joint.
+//   'orbit'  → ROTATE the parent orbit-rig around the cube's Y axis (composes
+//              cleanly with the baked clip, no off-frame fight); the whole body
+//              + staff circle the assembled cube — the "Jedi around the crystal".
+// NOTE: BézierCircleAction is KNOWN-FRAGILE (collapses the body / NaN bones on
+// some GPUs), so it is NOT used — rigAction.002 is the safe body clip for every
+// state, and the orbital motion comes from the rig, not the clip.
+// ==========================================================================
+    const WUKONG_FSM = {
+      enter: { dur: 2.4 },
+      idle:  { dur: 6.0 },
+      orbit: { dur: 0 },                     // loop forever
+      // every state plays the (safe) body clip; semantic 'idle'/'spin' collapse
+      // because the spin clip itself is unreliable.
+      pick: () => WUKONG.idleActionName || WUKONG.activeClip
+    };
+
+    function wukongEnter(idle){ WUKONG.state = idle; WUKONG.stateT = 0; }
+
+    function updateWukong(dt, p){
+      if (!WUKONG.ready) return;
+      WUKONG.stateT += dt;
+      const g = WUKONG.group;
+      const rig = WUKONG.orbitRig;
+      if (!g) return;
+      g.visible = true;                       // once ready, ALWAYS show
+
+      // ---- FSM: decide the current state based on elapsed time
+      if (WUKONG.state === 'enter' && WUKONG.stateT >= WUKONG_FSM.enter.dur) wukongEnter('idle');
+      else if (WUKONG.state === 'idle' && WUKONG.stateT >= WUKONG_FSM.idle.dur) wukongEnter('orbit');
+      const target = WUKONG.state;
+
+      // ---- animation crossfade to the current state's clip (always the safe body clip)
+      const wantClip = WUKONG_FSM.pick();
+      if (wantClip && wantClip !== WUKONG.activeClip){
+        const prevClip = WUKONG.activeClip;
+        WUKONG.activeClip = wantClip;
+        const next = WUKONG.actions[wantClip];
+        const cur  = prevClip ? WUKONG.actions[prevClip] : null;
+        if (next){
+          next.reset();
+          next.setLoop(THREE.LoopRepeat, Infinity);
+          next.clampWhenFinished = false;
+          next.fadeIn(0.4).play();
+          if (cur && cur !== next) cur.fadeOut(0.4);
+        }
+      }
+      // advance any loaded skeletal animation
+      if (WUKONG.mixer) WUKONG.mixer.update(dt);
+      // Refresh every skeleton so the GPU bone-matrix texture tracks the animation
+      if (WUKONG.skeletons){
+        for (const sk of WUKONG.skeletons){ try { sk.update(); } catch(e){} }
+      }
+
+      // ---- position / motion per state
+      g.updateMatrixWorld(true);
+      if (target === 'enter'){
+        // slide in from the left, arriving front-left of the cube
+        const t = easeInOut(Math.min(WUKONG.stateT / WUKONG_FSM.enter.dur, 1));
+        g.position.set(-20 + 13*t, 0.5*Math.sin(WUKONG.stateT*6), -6 + 2*t);
+        g.rotation.y = 0.7;
+      } else if (target === 'idle'){
+        // root front-left of the cube, gentle sway; body loops idle clip
+        g.position.set(-7, 0.0, -5);
+        g.rotation.y = 0.7;
+        g.rotation.z = 0.06*Math.sin(p*30);
+      } else {
+        // ORBIT: rotate the parent rig around the cube's Y axis. With the
+        // "BézierCircleAction" spin clip playing on him, this reads as him
+        // circling the assembled cube — the "Jedi around the crystal".
+        if (rig){
+          rig.position.set(0,0,0);
+          rig.rotation.y = p * Math.PI * 2 * WUKONG.targetDir;
+          // hold him on a ring around the cube centre
+          g.position.set(9.5, 0.0, 0);
+          g.rotation.y = 0.7;
+        }
+      }
+
+      // ---- STAFF flourish: twirl in the hand joint (body clip animates the arm too)
+      if (WUKONG.staff){
+        if (WUKONG.handBone){
+          WUKONG.staff.rotation.x += dt * 4.0;       // twirl about its length axis
+        } else {
+          WUKONG.staff.rotation.y += dt * 3.0;       // fallback: independent spin
+          WUKONG.staff.rotation.x = 0.4 * Math.sin(p*60);
+        }
+      }
+
+      // ---- status probe
+      g.updateMatrixWorld(true);
+      const wp = new THREE.Vector3(); g.getWorldPosition(wp);
+      const gs = g.scale.x.toFixed(2);
+      let bb = 'n/a';
+      try { const b = new THREE.Box3().setFromObject(g); const s = b.getSize(new THREE.Vector3()); bb = isFinite(s.x)&&isFinite(s.y)&&isFinite(s.z) ? s.toArray().map(v=>v.toFixed(1)).join('/') : 'nan?'; } catch(e){}
+      let ndc = 'n/a';
+      try {
+        const b = new THREE.Box3().setFromObject(g);
+        const c = b.getCenter(new THREE.Vector3());
+        if (!isFinite(c.x)||!isFinite(c.y)||!isFinite(c.z)) throw 0;
+        const pv = new THREE.Vector3(c.x,c.y,c.z).project(camera);
+        ndc = pv.x.toFixed(2) + ',' + pv.y.toFixed(2) + (isFinite(pv.z)&&pv.z<1&&pv.z>-1?'·inFrustum':'·out');
+      } catch(e){ ndc='nan?'; }
+      let totTris = 0; try { totTris = renderer.info.render.triangles; } catch(e){}
+      setWukongStatus('wukong: ' + WUKONG.state + ' · pos(' + wp.x.toFixed(1) + ',' + wp.y.toFixed(1) + ',' + wp.z.toFixed(1) + ')' +
+        ' · scale=' + gs + ' · bbox=' + bb + ' · ndc=' + ndc +
+        ' · sceneTris=' + totTris + ' · clip=' + (WUKONG.activeClip||'?') +
+        ' · stateT=' + WUKONG.stateT.toFixed(1) +
+        (WUKONG.clipInfo ? ' · [info] ' + WUKONG.clipInfo : ''));
+    }
+
+    // ------------------------------------------------------------------ main loop
+    const clock = new THREE.Clock();
+    let elapsed = 0;
+    const startT = performance.now();            // page-boot epoch, for the Wukong gate
+    // Wait for Wukong before starting the cinematic: he should arrive WITH the
+    // cube, not pop in late. Bounded wait so a slow/failed FBX never hangs the page.
+    let cinemStart = null;                       // when the cinematic starts (ms)
+    const WUKONG_CINEMA_WAIT = 6000;             // max ms to wait for Wukong
+
+    function render() {
+      requestAnimationFrame(render);
+      const dt = clock.getDelta();
+
+      wukongWait(performance.now());
+
+      if (playing && cinemStart !== null && performance.now() >= cinemStart) {
+        elapsed += dt*1000;
+        animT = (elapsed % M) / M;                       // loop the cinematic
+      }
+
+      update(performance.now());
+      updateWukong(dt, animT);                           // Wukong spawn + orbit + staff
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    // Hold the opening a beat if Wukong isn't parsed yet, so he can spawn as the
+    // bricks start arriving. Times out so the demo still runs without him.
+    function wukongWait(now){
+      if (cinemStart !== null) return;                   // already resolved
+      if (WUKONG.ready || WUKONG.failed || now >= startT + WUKONG_CINEMA_WAIT){
+        cinemStart = now;
+        if (!WUKONG.ready) setWukongStatus('wukong: still loading — starting cube without him');
+      } else {
+        setWukongStatus('wukong: loading fbx… (cinematic waiting)');
+      }
+    }
+
+    // progressive load of the standing GLB (Blender-transcoded from the rigged FBX;
+    // GLTFLoader is production-grade vs the FBX's lying-bind geometry)
+    (function loadWukongFbx(){
+      try {
+        new GLTFLoader().load(
+          './wukong-web.glb',   // lean decimated web asset (5.5MB); colored in wukongMaterial()
+          (gltf) => {
+            // GLTFLoader exposes clips on gltf.animations; the Wukong setup reads
+            // them via loaded.animations, so attach them to the scene root.
+            gltf.scene.animations = gltf.animations || [];
+            try { setupWukong(gltf.scene); }
+            catch(e){ console.error('[wukong] setup failed', e); WUKONG.failed = true; setWukongStatus('wukong: setup error — ' + e.message); }
+          },
+          undefined,
+          (err) => { console.warn('[wukong] GLB load failed — cube runs without him', err); WUKONG.failed = true; setWukongStatus('wukong: glb load failed'); }
+        );
+      } catch(e){
+        console.warn('[wukong] loader unavailable', e); WUKONG.failed = true;
+        setWukongStatus('wukong: loader unavailable');
+      }
+    })();
+
+    // ------------------------------------------------------------------ controls
+    function setMode(mode){
+      standalone = mode;
+      document.getElementById('btn-cinematic').classList.toggle('active', mode==='Cinematic');
+      document.getElementById('btn-xray').classList.toggle('active', mode==='Engineering X-Ray');
+      // rebuild homes so X-Ray can keep twins separated in the cube
+      slotIndex = 0; assignHomes();
+      toast(mode === 'Cinematic' ? 'Cinematic · 50% reality + 50% choreography'
+                                  : 'Engineering X-Ray · only measured anchors, no interpolation · '
+                                    + meas.shape_groups + ' shape groups, '
+                                    + meas.semantic_aliases + ' semantic aliases');
+    }
+    document.getElementById('btn-cinematic').onclick = ()=>setMode('Cinematic');
+    document.getElementById('btn-xray').onclick = ()=>setMode('Engineering X-Ray');
+    document.getElementById('btn-replay').onclick = ()=>{ elapsed = 0; animT = 0; toast('replay from saved JSON'); };
+    document.addEventListener('keydown', e=>{
+      if (e.key==='Escape'){ setMode('Cinematic'); }
+      if (e.key===' '){ playing=!playing; e.preventDefault(); toast(playing?'resume':'paused'); }
+    });
+
+    // ------------------------------------------------------------------ init
+    assignHomes();
+    setPhase('arrival');
+    toast('BeeHive assemblies · "3 models. 1 hive. Zero ketchup."');
+    render();
+
+    window.addEventListener('resize', ()=>{
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>

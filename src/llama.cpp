@@ -5,6 +5,8 @@
 
 #include "llama-chat.h"
 #include "llama-context.h"
+#include "llama-dedup.h"
+#include "llama-dedup-manifest.h"
 #include "llama-mmap.h"
 #include "llama-vocab.h"
 #include "llama-model-loader.h"
@@ -500,6 +502,74 @@ struct llama_model * llama_model_load_from_splits(
         splits.push_back(paths[i]);
     }
     return llama_model_load_from_file_impl(nullptr, nullptr, nullptr, splits.front(), splits, /*file*/ nullptr, params);
+}
+
+// -----------------------------------------------------------------------
+// BEEHIVE: process-wide shared-weight dedup shelf (experimental).
+// A single llama_dedup_registry lives for the life of the process; the
+// dedup-aware loader consults it so identical layers across models are
+// materialized once. See llama-model-loader.* for the loader-side wiring.
+// -----------------------------------------------------------------------
+
+static llama_dedup_registry * g_dedup = nullptr;
+
+void * llama_dedup_registry_get(void) {
+    if (g_dedup == nullptr) {
+        g_dedup = new llama_dedup_registry();
+    }
+    return g_dedup;
+}
+
+struct llama_dedup_stats llama_dedup_get_stats(void) {
+    if (g_dedup == nullptr) {
+        return { 0, 0, 0, 0, 0 };
+    }
+    const auto s = g_dedup->stats();
+    return { s.unique_layers, s.total_aliases, s.resident_bytes, s.shape_owners, s.semantic_aliases };
+}
+
+uint64_t llama_dedup_hash_buffer(const void * data, size_t len, uint64_t seed) {
+    return llama_dedup_registry::xxh64((const uint8_t *) data, len, seed);
+}
+
+uint64_t llama_dedup_dtype_fingerprint(
+        const void * data, size_t len, int type, const long long ne[4]) {
+    int64_t ne4[4] = { ne[0], ne[1], ne[2], ne[3] };
+    return llama_dedup_registry::dtype_fingerprint(data, len, (ggml_type) type, ne4);
+}
+
+// --- persistent layer manifest (docker-like delta) ---
+
+static llama_dedup_manifest * g_manifest = nullptr;
+
+void llama_dedup_manifest_set_dir(const char * dir) {
+    if (g_manifest == nullptr) g_manifest = new llama_dedup_manifest();
+    g_manifest->set_cache_dir(dir != nullptr ? dir : "beehive-cache");
+}
+
+void llama_dedup_manifest_load(void) {
+    if (g_manifest == nullptr) g_manifest = new llama_dedup_manifest();
+    g_manifest->load();
+}
+
+void llama_dedup_manifest_flush(void) {
+    if (g_manifest == nullptr) g_manifest = new llama_dedup_manifest();
+    g_manifest->flush();
+}
+
+size_t llama_dedup_manifest_count(void) {
+    if (g_manifest == nullptr) return 0;
+    return g_manifest->entry_count();
+}
+
+int llama_dedup_manifest_persist(
+        const char * name, int type, const long long ne[4], const void * data, size_t len,
+        uint64_t fp) {
+    if (g_manifest == nullptr) g_manifest = new llama_dedup_manifest();
+    int64_t ne4[4] = { ne[0], ne[1], ne[2], ne[3] };
+    const auto * e = g_manifest->persist(
+        name, (ggml_type) type, ne4, (const uint8_t *) data, len, fp);
+    return e != nullptr ? 1 : 0;
 }
 
 struct llama_model * llama_model_load_from_file_ptr(FILE * file, struct llama_model_params params) {

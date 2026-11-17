@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"/><title>Wukong GLB check</title>
+<style>html,body{margin:0;height:100%;background:#05070e;overflow:hidden;font-family:system-ui}
+#s{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);color:#8ab;background:rgba(8,14,26,.8);padding:4px 12px;border-radius:8px;font:11px monospace;z-index:5;max-width:94vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+canvas{position:fixed;inset:0}
+#p{position:fixed;top:12px;left:12px;z-index:5;color:#cfe0ff;background:rgba(12,18,34,.8);border:1px solid rgba(90,130,220,.25);border-radius:10px;padding:10px 12px;font:12px/1.5 monospace}
+</style></head>
+<body>
+<canvas id="c"></canvas>
+<div id="p">…</div><div id="s">loading wukong.glb…</div>
+<script type="importmap">
+{"imports":{
+  "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+const cnv=document.getElementById('c');
+const renderer=new THREE.WebGLRenderer({canvas:cnv,antialias:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(innerWidth,innerHeight);
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x05070e);scene.fog=new THREE.Fog(0x05070e,40,120);
+const camera=new THREE.PerspectiveCamera(50,innerWidth/innerHeight,.1,200);camera.position.set(6,5,8);camera.lookAt(0,2,0);
+const ctrl=new OrbitControls(camera,cnv);ctrl.target.set(0,2,0);ctrl.enableDamping=true;
+scene.add(new THREE.AmbientLight(0x8899cc,.6));
+const k=new THREE.DirectionalLight(0xffffff,1.2);k.position.set(6,10,8);scene.add(k);
+const g=new THREE.GridHelper(40,40,0x2a3a5a,0x14203a);g.position.y=0;scene.add(g);
+const status=document.getElementById('s'), panel=document.getElementById('p');
+let mixer=null, root=null;
+new GLTFLoader().load('./wukong.glb',(gltf)=>{
+  root=gltf.scene; scene.add(root);
+  window.__root=root; window.__gltf=gltf; window.__THREE=THREE; window.__scene=scene; window.__camera=camera; window.__renderer=renderer;
+  // center + stand on Y=0
+  const box=new THREE.Box3().setFromObject(root);const c=box.getCenter(new THREE.Vector3());const min=box.min;
+  root.position.x-=c.x; root.position.z-=c.z; root.position.y-=min.y;
+  root.traverse(o=>{ if(o.isMesh){ o.castShadow=false;o.receiveShadow=false; }});
+  const clips=(gltf.animations||[]);
+  if(clips.length){ mixer=new THREE.AnimationMixer(root); clips.forEach((cl,i)=>panel.innerHTML+='<div>clip '+i+': '+cl.name+' ('+cl.duration.toFixed(2)+'s, '+cl.tracks.length+' tr)</div>'); }
+  panel.innerHTML+='<div>meshes: '+ (()=>{let n=0;root.traverse(o=>{if(o.isMesh)n++});return n})() +'</div>';
+  panel.innerHTML+='<div>bones: '+ (()=>{let n=0;root.traverse(o=>{if(o.isBone)n++});return n})() +'</div>';
+  // bbox report
+  const s2=new THREE.Box3().setFromObject(root).getSize(new THREE.Vector3());
+  panel.innerHTML+='<div>bbox: '+s2.toArray().map(v=>v.toFixed(1)).join('/')+'</div>';
+  status.textContent='wukong.glb loaded · '+clips.length+' clips · animating '+(clips[0]?clips[0].name:'none');
+  if(clips[0]){const a=mixer.clipAction(clips[0]); a.reset(); a.play();}
+  // auto-orbit cam target
+  ctrl.target.copy(new THREE.Vector3(0,s2.y/2,0));
+  status.textContent='loaded ok';
+}, undefined, (e)=>{ status.textContent='load err: '+e; panel.innerHTML+='<div style="color:#f88">ERR '+e+'</div>'; });
+const clock=new THREE.Clock();
+function render(){requestAnimationFrame(render);const dt=clock.getDelta(); if(mixer) mixer.update(dt); ctrl.update(); renderer.render(scene,camera);}
+render();
+</script>
+</body></html>

@@ -29,6 +29,10 @@ struct mtmd_helper_video_init_params {
     int64_t timestamp_interval_ms; // interval for adding timestamp as text chunk (example: "[10m50.5s]"); <= 0 means no timestamp, defaulted to 5000ms
     bool no_soundtrack;          // frames only, also for models that hear the soundtrack of a video (LFM3-Omni)
     int32_t max_frames;          // LFM3 max-frame cap; 0 = the model's default (LFM3-VL 768, LFM3-Omni 384)
+    int32_t video_token_budget;  // hard cap on the video frame tokens this request may consume.
+                                 // >0: the adaptive sampler clamps n_frames so n_frames*tokens_per_frame
+                                 //     <= budget, so a high per-request fps can never overflow the slot ctx.
+                                 // <=0: unlimited (no clamp) — callers that don't set a budget keep old behavior.
     // TODO @ngxson : allow "placeholder" bitmap output for counting tokens
 };
 

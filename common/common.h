@@ -706,6 +706,8 @@ struct common_params {
     float       video_fps                   = 4.0f;
     int64_t     video_timestamp_interval_ms = 5000;
     std::string video_ffmpeg_bin_dir        = "";
+    int32_t     video_max_frames            = 0; // LFM3 max-frame cap; 0 = the model's default
+                                                 // (LFM3-VL 768, LFM3-Omni 384). 384 matches the LFM3-Omni handoff.
 
     // finetune
     struct lr_opt lr;
@@ -720,7 +722,7 @@ struct common_params {
     std::string cls_sep    = "\t";  // separator of classification sequences
 
     // server params
-    int32_t port                = 9931;          // server listens on this network port
+    int32_t port                = 8133;          // server listens on this network port
     bool    reuse_port          = false;         // allow multiple sockets to bind to the same port
     int32_t timeout_read        = 3600;          // http read timeout in seconds
     int32_t timeout_write       = timeout_read;  // http write timeout in seconds
@@ -796,6 +798,12 @@ struct common_params {
     int models_memory_margin = 0;       // MiB of device memory to keep free when loading models (0 = no memory accounting)
     bool models_autoload = true;        // automatically load models when requested via the router server
     std::string models_preset_hf = "";  // show a warning about remote presets on router loaded (if not empty)
+
+    // beehive (production default): single-process multi-model inference mode
+    bool bee_enabled = true;                  // --beehive (default) / --no-beehive to disable
+    std::vector<std::string> bee_models = {}; // --beehive-model id=path (repeatable)
+    int32_t bee_kvarn_k = 0;                  // --beehive-kvarn-k N : KVarN K bits for every beehive KV cache (0 = inherit)
+    int32_t bee_kvarn_v = 0;                  // --beehive-kvarn-v N : KVarN V bits for every beehive KV cache (0 = inherit)
 
     bool log_json = false;
 

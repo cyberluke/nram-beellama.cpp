@@ -1128,7 +1128,7 @@ void process_shaders() {
     string_to_spv("sum_rows_f32", "sum_rows.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"D_TYPE", "float"}}));
     string_to_spv("cross_entropy_loss_f32", "cross_entropy_loss.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
     string_to_spv("cross_entropy_loss_back_f32", "cross_entropy_loss_back.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float"}, {"D_TYPE", "float"}}));
-    string_to_spv("fwht_f32", "fwht.comp", {});
+    string_to_spv("fwht_f32", "fwht.comp", {{"A_TYPE", "float"}});
     string_to_spv("kvarn_store", "kvarn_store.comp", {});
     string_to_spv("kvarn_materialize", "kvarn_materialize.comp", {});
     string_to_spv("kvarn_flash_attn", "kvarn_flash_attn.comp", {});
@@ -1136,7 +1136,7 @@ void process_shaders() {
     string_to_spv("kvarn_wht", "kvarn_wht.comp", {});
     string_to_spv("kvarn_wht_d256", "kvarn_wht_parallel.comp", {{"HEAD_WIDTH", "256"}});
     string_to_spv("kvarn_wht_d512", "kvarn_wht_parallel.comp", {{"HEAD_WIDTH", "512"}});
-    string_to_spv("fwht_shmem_f32", "fwht.comp", {{"FWHT_SHMEM", "1"}});
+    string_to_spv("fwht_shmem_f32", "fwht.comp", {{"FWHT_SHMEM", "1"}, {"A_TYPE", "float"}});
     string_to_spv("count_equal_i32", "count_equal.comp", merge_maps(base_dict, {{"A_TYPE", "int"}, {"B_TYPE", "int"}, {"D_TYPE", "int"}}));
     string_to_spv("dsv4_hc_comb_f32", "dsv4_hc_comb.comp", {});
     string_to_spv("dsv4_hc_pre_f32",  "dsv4_hc_pre.comp",  {});

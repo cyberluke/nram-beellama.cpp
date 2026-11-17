@@ -5810,6 +5810,39 @@ llama_kv_memory_stats llama_get_kv_memory_stats(const struct llama_context * ctx
     return memory ? memory->kv_memory_stats() : llama_kv_memory_stats{};
 }
 
+bool llama_context_get_kv_memory_map(const struct llama_context * ctx, struct llama_kv_memory_map * out) {
+    if (!ctx || !out) {
+        return false;
+    }
+    const llama_kv_memory_stats s = ctx->get_memory()
+        ? ctx->get_memory()->kv_memory_stats() : llama_kv_memory_stats{};
+    out->global_resident_bytes   = s.global.resident_bytes();
+    out->global_capacity_tokens  = s.global.allocated_capacity_tokens;
+    out->swa_resident_bytes      = s.swa.resident_bytes();
+    out->swa_capacity_tokens     = s.swa.allocated_capacity_tokens;
+    out->total_resident_bytes    = s.resident_bytes();
+    return true;
+}
+
+bool llama_context_get_memory_map(const struct llama_context * ctx, struct llama_memory_map * out) {
+    if (!ctx || !out) {
+        return false;
+    }
+    llama_memory_breakdown bd = ctx->memory_breakdown();
+    uint64_t model = 0, compute = 0, context = 0, total = 0;
+    for (const auto & [buft, mb] : bd) {
+        model   += mb.model;
+        compute += mb.compute;
+        context += mb.context;
+        total   += mb.total();
+    }
+    out->model_bytes   = model;
+    out->compute_bytes = compute;
+    out->context_bytes = context;
+    out->total_bytes   = total;
+    return true;
+}
+
 llama_context * llama_get_ctx_other(struct llama_context * ctx) {
     return ctx->get_cparams().ctx_other;
 }

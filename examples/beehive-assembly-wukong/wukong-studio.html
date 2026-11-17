@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Wukong RIG STUDIO — GLB (standing) · custom choreo</title>
+<style>
+  :root{ --bg:#05070e; --panel:rgba(12,18,34,.85); --line:rgba(90,130,220,.25); --txt:#cfe0ff; --dim:#6b7fb0; --accent:#65e3ff; }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; height:100%; background:var(--bg); overflow:hidden; font-family:'Segoe UI',system-ui,sans-serif; }
+  canvas{ position:fixed; inset:0; }
+  .panel{ position:fixed; top:16px; left:16px; background:var(--panel); border:1px solid var(--line);
+    padding:14px 16px; border-radius:12px; color:var(--txt); width:310px; max-height:88vh; overflow:auto;
+    font-size:12px; line-height:1.5; box-shadow:0 8px 30px rgba(0,0,0,.5); backdrop-filter:blur(6px); z-index:20; }
+  .panel h1{ font-size:14px; margin:0 0 4px; color:var(--accent); }
+  .panel .sub{ color:var(--dim); font-size:11px; margin-bottom:10px; }
+  .stat{ display:flex; justify-content:space-between; border-top:1px solid rgba(255,255,255,.05); padding:3px 0; }
+  .stat b{ color:#fff; }
+  .btns{ display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+  .btns button{ background:rgba(101,227,255,.12); border:1px solid var(--line); color:var(--txt); border-radius:8px; padding:4px 10px; cursor:pointer; font-size:11px; }
+  .btns button:hover{ background:rgba(101,227,255,.25); }
+  #status{ position:fixed; bottom:14px; left:50%; transform:translateX(-50%); font:11px monospace; color:#7a8fc0;
+    background:rgba(10,16,30,.7); padding:4px 12px; border-radius:8px; border:1px solid var(--line); z-index:20; max-width:92vw; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div class="panel">
+  <h1>Wukong RIG STUDIO · GLB</h1>
+  <div class="sub">GLTFLoader (production-grade) — the Blender-transcoded standing skeleton + baked clips.</div>
+  <div class="stat"><span>state</span><b id="stateVal">—</b></div>
+  <div class="stat"><span>clip</span><b id="clipVal">—</b></div>
+  <div class="stat"><span>staffParent</span><b id="staffVal">—</b></div>
+  <div class="stat"><span>bbox(h>w=stand)</span><b id="bboxVal">—</b></div>
+  <div class="btns" id="clips"></div>
+  <div class="btns">
+    <button id="btnChoreo">▶ custom choreo (5 beats)</button>
+    <button id="btnBindStaff">bind staff→handR</button>
+  </div>
+</div>
+<div id="status">loading wukong.glb…</div>
+
+<script type="importmap">
+{"imports":{
+  "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/"
+}}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { buildWukongChoreo, defaultChoreo } from './wukong-choreo.js';
+
+const canvas=document.getElementById('canvas');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.setSize(innerWidth,innerHeight);
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x05070e); scene.fog=new THREE.Fog(0x05070e,60,160);
+const camera=new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 400);
+camera.position.set(6,5,8);
+const controls=new OrbitControls(camera,canvas); controls.target.set(0,2,0); controls.enableDamping=true;
+scene.add(new THREE.AmbientLight(0x8899cc,0.6));
+const key=new THREE.DirectionalLight(0xffffff,1.2); key.position.set(6,10,8); scene.add(key);
+const rim=new THREE.DirectionalLight(0x65e3ff,0.5); rim.position.set(-8,4,-10); scene.add(rim);
+const grid=new THREE.GridHelper(40,40,0x2a3a5a,0x14203a); grid.position.y=0; scene.add(grid);
+const st=document.getElementById('status');
+const s=(m)=>{st.textContent=m;};
+
+const W={ root:null, mixer:null, clips:[], ready:false, staff:null, handR:null, actions:{}, activeClip:null, skeletons:[] };
+window.__W=W; window.__THREE=THREE;
+
+function wkm(nameLower){
+  const W2=/torus|retopo_cylinder|weapon/.test(nameLower), A=/armor|hat/.test(nameLower), S=/skin|cloth|body|fur_/.test(nameLower);
+  const p=(c,o)=>({color:c,side:THREE.DoubleSide,...o});
+  if(W2)return new THREE.MeshStandardMaterial(p(0xe7c05a,{metalness:.9,roughness:.28,emissive:0xff9d2e,emissiveIntensity:.09}));
+  if(A)return new THREE.MeshStandardMaterial(p(0x8a3b1f,{metalness:.85,roughness:.35,emissive:0x5a1600,emissiveIntensity:.06}));
+  if(S)return new THREE.MeshStandardMaterial(p(0xd9b98c,{roughness:.7,metalness:.05}));
+  return new THREE.MeshStandardMaterial(p(0x241812,{roughness:.9,metalness:0}));
+}
+
+function setup(gltf){
+  const root=gltf.scene;
+  W.root=root; W.clips=gltf.animations||[];
+  // normalize: center horizontally, feet at y=0, fit to ~7.5 tall
+  const box=new THREE.Box3().setFromObject(root);
+  const size=box.getSize(new THREE.Vector3()), ctr=box.getCenter(new THREE.Vector3());
+  root.position.x-=ctr.x; root.position.z-=ctr.z; root.position.y-=box.min.y;
+  const scl=7.5/Math.max(size.y,0.0001);
+  root.scale.set(scl,scl,scl);
+  scene.add(root);
+  // material override + collect skeletons + find staff(Torus/Retopo) + handR bone
+  root.traverse(o=>{
+    if(o.isMesh){ o.material=wkm((o.name||'').toLowerCase()); o.castShadow=false; o.receiveShadow=false; }
+    if(o.isBone && o.name==='DEF-handR') W.handR=o;
+    if(o.isSkinnedMesh && o.skeleton && !W.skeletons.includes(o.skeleton)) W.skeletons.push(o.skeleton);
+    if(o.isMesh && /Torus|Retopo_Cylinder|weapon/i.test(o.name)) W.staff=o;
+  });
+  W.mixer=new THREE.AnimationMixer(root);
+  const clips=document.getElementById('clips'); clips.innerHTML='';
+  (W.clips).slice(0,3).forEach((c,i)=>{
+    const b=document.createElement('button'); b.textContent=c.name+' '+(c.duration||0).toFixed(1)+'s';
+    b.onclick=()=>playClip(c.name); clips.appendChild(b);
+  });
+  for(const c of W.clips) try{ W.actions[c.name]=W.mixer.clipAction(c); }catch(e){}
+  // default: play the 2nd (safe) clip once to show a standing pose
+  const safe=W.clips.find(c=>/rigAction\.002/.test(c.name))||W.clips[0];
+  if(safe) playClip(safe.name);
+  W.ready=true;
+  s('wukong.glb ready · '+W.clips.length+' clips');
+  wireClipsBox();
+  document.getElementById('btnBindStaff').onclick=bindStaff;
+  document.getElementById('btnChoreo').onclick=()=>playChoreo();
+  document.getElementById('clipVal').textContent=safe?safe.name:'(none)';
+}
+
+function wireClipsBox(){}
+
+function playClip(name,target=null){
+  const a=W.actions[name]; if(!a) return;
+  a.reset(); a.setLoop(THREE.LoopRepeat,Infinity); a.clampWhenFinished=false; a.fadeIn(0.3).play();
+  W.activeClip=name; document.getElementById('clipVal').textContent=name;
+}
+
+function bindStaff(){
+  if(!W.staff){ s('no staff mesh found'); return; }
+  if(!W.handR){ s('no DEF-handR bone found'); return; }
+  W.handR.updateMatrixWorld(true);
+  const target=new THREE.Vector3().setFromMatrixPosition(W.handR.matrixWorld);
+  if(W.staff.parent) W.staff.parent.remove(W.staff);
+  W.handR.add(W.staff);
+  W.staff.position.set(0,0,0); W.staff.quaternion.identity(); W.staff.scale.set(1,1,1);
+  W.staff.updateMatrixWorld(true);
+  document.getElementById('staffVal').textContent='DEF-handR (world '+target.toArray().map(v=>+v.toFixed(1)).join(',')+')';
+  s('staff bound → DEF-handR');
+}
+window.__bindStaff=bindStaff;
+
+function playChoreo(){
+  if(!W.staff) bindStaff();
+  // build the AI-authored custom clip on the GLB root, and play it.
+  const staffName=W.staff?W.staff.name:null;
+  const clip=buildWukongChoreo(THREE, W.root, defaultChoreo, { name:'wukong-beats', staffName, loop:true });
+  const a=W.mixer.clipAction(clip); a.reset(); a.setLoop(THREE.LoopRepeat,Infinity); a.play();
+  W.activeClip=clip.name;
+  document.getElementById('clipVal').textContent=clip.name+' ('+clip.duration.toFixed(1)+'s, '+clip.tracks.length+' tr)';
+  s('AI choreo playing: '+clip.name+' · '+clip.tracks.length+' tracks');
+}
+window.__playChoreo=playChoreo;
+
+// render loop
+const clock=new THREE.Clock();
+function render(){
+  requestAnimationFrame(render);
+  const dt=clock.getDelta();
+  if(W.ready&&W.mixer){ W.mixer.update(dt); for(const sk of W.skeletons){try{sk.update();}catch(e){}} }
+  if(W.ready&&W.root){
+    W.root.updateMatrixWorld(true);
+    const wp=new THREE.Vector3(); W.root.getWorldPosition(wp);
+    let bb='n/a'; try{const b=new THREE.Box3().setFromObject(W.root);const sz=b.getSize(new THREE.Vector3());bb=sz.toArray().map(v=>+v.toFixed(1)).join('/');}catch(e){}
+    document.getElementById('bboxVal').textContent=bb;
+    document.getElementById('stateVal').textContent=W.activeClip||'-';
+  }
+  controls.update(); renderer.render(scene,camera);
+}
+render();
+
+new GLTFLoader().load('./wukong.glb',(g)=>{ try{setup(g);}catch(e){ s('setup err: '+e.message); console.error(e);} },
+  undefined,(e)=>{ s('glb load err'); console.error(e); });
+</script>
+</body>
+</html>

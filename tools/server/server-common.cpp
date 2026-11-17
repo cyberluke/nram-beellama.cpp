@@ -1373,6 +1373,21 @@ void handle_media(
         GGML_ASSERT(media_path.back() == DIRECTORY_SEPARATOR);
     }
 
+    // In-process fast path: `media://<id>` reads the previously-ingested frame
+    // bytes straight from the in-memory register (no temp file, no base64, no
+    // HTTP re-download). The raw_buffer is consumed once, so a reused id is a
+    // clear signal the caller must re-ingest.
+    if (string_starts_with(url, "media://")) {
+        const std::string id = url.substr(8); // strip "media://"
+        raw_buffer data;
+        if (!media_register_consume(id, data)) {
+            throw std::runtime_error("media:// id is unknown or expired; re-ingest via POST /v1/beehive/media first");
+        }
+        SRV_INF("loaded media://%s from in-memory register (%zu bytes)\n", id.c_str(), data.size());
+        out_files.push_back(std::move(data));
+        return;
+    }
+
     if (string_starts_with(url, "http")) {
         // download remote image
         // TODO @ngxson : maybe make these params configurable
@@ -1433,6 +1448,69 @@ void handle_media(
         }
         out_files.push_back(decoded_data);
     }
+}
+
+// ---- In-memory media register (media:// fast path) ----
+// A bounded, mutex-guarded map of id -> raw_buffer used by the `media://<id>`
+// handler above. Entries are single-consumption (consumed once by handle_media)
+// and age out after MEDIA_REGISTER_TTL so an ingest whose chat request never
+// arrives cannot hold memory forever. This keeps it strictly bounded (oop leaks).
+namespace {
+    std::mutex g_media_mutex;
+    struct media_entry { raw_buffer data; std::chrono::steady_clock::time_point born; };
+    std::map<std::string, media_entry> g_media_register;
+    const std::chrono::seconds MEDIA_REGISTER_TTL(60);
+
+    // Reject ids with path/URL metacharacters so a hostile id cannot escape the
+    // register into a file-system/URL parse edge. Opaque random tokens only.
+    bool media_id_is_opaque(const std::string & id) {
+        if (id.empty()) return false;
+        return id.find_first_of("/\\:?&#% \t\r\n") == std::string::npos;
+    }
+
+    void media_register_prune(std::unique_lock<std::mutex> &) {
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = g_media_register.begin(); it != g_media_register.end();) {
+            if (now - it->second.born > MEDIA_REGISTER_TTL) {
+                it = g_media_register.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+} // namespace
+
+std::string media_register_put(std::string id, raw_buffer data) {
+    if (!media_id_is_opaque(id) || data.empty()) {
+        return std::string();
+    }
+    std::unique_lock<std::mutex> lock(g_media_mutex);
+    media_register_prune(lock); // keep the map small before inserting
+    g_media_register[id] = media_entry{ std::move(data), std::chrono::steady_clock::now() };
+    return id;
+}
+
+bool media_register_consume(const std::string & id, raw_buffer & out) {
+    std::unique_lock<std::mutex> lock(g_media_mutex);
+    media_register_prune(lock);
+    auto it = g_media_register.find(id);
+    if (it == g_media_register.end()) {
+        return false;
+    }
+    out = std::move(it->second.data);
+    g_media_register.erase(it);
+    return true;
+}
+
+bool media_register_peek(const std::string & id, raw_buffer & out) {
+    std::unique_lock<std::mutex> lock(g_media_mutex);
+    media_register_prune(lock);
+    auto it = g_media_register.find(id);
+    if (it == g_media_register.end()) {
+        return false;
+    }
+    out = it->second.data; // copy; the entry stays for re-ingestion
+    return true;
 }
 // load media files from an OAI content array, then replace each media part with a media marker text part
 static void oaicompat_content_load_media(json & content, const server_chat_params & opt, std::vector<raw_buffer> & out_files,

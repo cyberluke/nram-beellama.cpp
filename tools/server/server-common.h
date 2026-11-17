@@ -298,6 +298,23 @@ void handle_media(
         const std::string & url,
         const std::string & media_path);
 
+// In-memory media register backing a `media://<id>` handler: a parent process
+// (NAI Browser server) ingests raw clip/photo bytes here via POST /v1/beehive/media
+// and references the returned `media://<id>` in an `input_video`/`image_url` .url,
+// so the bundled engine reads the frame bytes straight from RAM with no temp file,
+// no base64 over the chat wire and no re-encode. Single-consumption + age-out keep
+// it bounded and leak-free. The id must be a caller-supplied opaque token; the
+// register refuses ids that do not look opaque (non-empty, no path/URL metacharacters).
+//
+// Returns the opaque id on success, or an empty string when the identifier was the
+// reserved invalid form / the buffer is empty. `media_register_consume` returns true
+// and fills `out` on a hit (erasing the entry), false when unknown/expired.
+std::string media_register_put(std::string id, raw_buffer data);
+bool media_register_consume(const std::string & id, raw_buffer & out);
+// Non-consuming copy of a registered media blob (so an N-window orchestrator can
+// re-ingest the same source bytes per window). Returns false when unknown/expired.
+bool media_register_peek(const std::string & id, raw_buffer & out);
+
 // process mtmd prompt, return the server_tokens containing both text tokens and media chunks
 // if is_placeholder is true, the media chunk will be treated as placeholder for counting tokens; the output tokens are not usable for actual inference (e.g. for submitting a task to server_queue)
 server_tokens process_mtmd_prompt(

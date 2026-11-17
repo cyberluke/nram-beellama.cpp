@@ -227,6 +227,13 @@ MTMD_API struct mtmd_media_capabilities mtmd_get_media_capabilities(const mtmd_c
 // values are in media tokens; 0 or negative means "unspecified"
 MTMD_API struct mtmd_media_token_budget mtmd_get_media_token_budget(const mtmd_context * ctx, enum mtmd_input_chunk_type media_type);
 
+// exact token count that ONE video frame at the given output frame size will
+// consume in this model's projector (the same figure the real decode produces).
+// Used by the adaptive video sampler to clamp the frame count to the request's
+// available context so a high per-request fps can never overflow the slot.
+// Returns -1 when the count cannot be derived (image preprocessing absent).
+MTMD_API int32_t mtmd_get_video_frame_tokens(const mtmd_context * ctx, int frame_width, int frame_height);
+
 // media budget counters, cumulative since context initialization
 MTMD_API struct mtmd_counters mtmd_get_counters(const mtmd_context * ctx);
 
@@ -251,11 +258,16 @@ struct mtmd_video_config {
     int32_t n_frames;     // number of frames to sample
     int32_t frame_width;  // size to resize the frames to
     int32_t frame_height;
+    int32_t max_frames;   // processor cap honored by the sampler; 0 = use the model's default cap
+                          // (LFM3-VL 768, LFM3-Omni 384). Overridable per request/transport.
 };
 // src_n_frames and src_fps can be <= 0 if unknown
+// max_frames: 0 = use the model's default processor cap; >0 overrides it
+//             (the LFM3 max-frame handoff passes 384 for the LFM3-Omni / VL processor max)
 MTMD_API struct mtmd_video_config mtmd_get_video_config(const mtmd_context * ctx,
                                                         int32_t src_width, int32_t src_height,
-                                                        int32_t src_n_frames, float src_fps);
+                                                        int32_t src_n_frames, float src_fps,
+                                                        int32_t max_frames = 0);
 
 // get the current marker string
 MTMD_API const char * mtmd_get_marker(const mtmd_context * ctx);

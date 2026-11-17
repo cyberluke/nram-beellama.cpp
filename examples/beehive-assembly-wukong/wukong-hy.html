@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Wukong · HY-Motion prompt animation</title>
+<style>
+  :root{ --bg:#05070e; --line:rgba(90,130,220,.25); --txt:#cfe0ff; --dim:#6b7fb0; --accent:#65e3ff; }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; height:100%; background:var(--bg); overflow:hidden; font-family:'Segoe UI',system-ui,sans-serif; }
+  canvas{ position:fixed; inset:0; }
+  .panel{ position:fixed; top:16px; right:16px; width:300px; max-height:88vh; overflow:auto;
+    background:rgba(12,18,34,.82); border:1px solid var(--line); border-radius:12px; padding:14px;
+    color:var(--txt); font-size:12px; line-height:1.5; box-shadow:0 8px 30px rgba(0,0,0,.5); backdrop-filter:blur(6px); z-index:20; }
+  .panel h1{ font-size:14px; margin:0 0 4px; color:var(--accent); }
+  .panel .sub{ color:var(--dim); font-size:11px; margin-bottom:10px; }
+  .panel textarea{ width:100%; height:70px; resize:vertical; background:#0a1020; color:var(--txt);
+    border:1px solid var(--line); border-radius:8px; padding:6px; font:11px monospace; }
+  .panel button{ width:100%; margin-top:8px; padding:7px; border:1px solid var(--line); border-radius:8px;
+    background:rgba(101,227,255,.15); color:var(--txt); cursor:pointer; font-size:12px; }
+  .panel button:hover{ background:rgba(101,227,255,.3); }
+  .stat{ display:flex; justify-content:space-between; border-top:1px solid rgba(255,255,255,.06); padding:3px 0; }
+  .stat b{ color:#fff; font-weight:600; }
+  #status{ position:fixed; bottom:14px; left:50%; transform:translateX(-50%); font:11px monospace;
+    color:#8aa; background:rgba(10,16,30,.75); padding:4px 14px; border-radius:8px; border:1px solid var(--line); z-index:20; max-width:92vw; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .run{ font:10px monospace; color:var(--txt); padding:3px 6px; margin:2px 0; border:1px solid rgba(255,255,255,.07); border-radius:6px; cursor:pointer; background:rgba(255,255,255,.03); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .run:hover{ background:rgba(101,227,255,.15); border-color:var(--accent); }
+  .run .dim{ color:var(--dim); }
+  .hint{ color:var(--dim); font-size:10px; margin-top:8px; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+
+<div class="panel" id="panel">
+  <h1>Wukong · HY-Motion</h1>
+  <div class="sub">Prompt-driven skeletal animation via ComfyUI+HY-Motion. No tetris, no particles — just the rig.</div>
+  <div class="stat" style="border-top:none"><span>mode</span><b id="modeVal">web GLB clip</b></div>
+  <div class="stat"><span>clip</span><b id="clipVal">—</b></div>
+  <div class="stat"><span>bframe</span><b id="bboxVal">—</b></div>
+  <label style="display:block;margin-top:12px">▶ prompt the next animation</label>
+  <textarea id="prompt">A Wukong warrior stands upright and gives a deep ceremonial bow toward the camera, then rises and twirls his long staff overhead in a wide circle, steps forward and sweeps the staff in a powerful arc, then returns to a ready guard. Smooth, theatrical, feet rooted.</textarea>
+  <button id="btnGen">▶ Run HY-Motion (prompt → animated Wukong)</button>
+  <div class="hint" id="genNote">ComfyUI runs locally · HY-Motion + RTX 4090 · takes ~3-4 min per generation.</div>
+  <div style="margin-top:8px;border-top:1px solid rgba(255,255,255,.06);padding-top:8px">
+    <div style="color:var(--dim);font-size:10px">persisted runs (sha256 — click to load)</div>
+    <div id="runList" style="max-height:160px;overflow:auto;margin-top:4px"></div>
+  </div>
+</div>
+<div id="status">loading wukong-hy-animated.glb…</div>
+<div id="diag" style="position:fixed;bottom:40px;left:50%;transform:translateX(-50%);font:10px monospace;color:#556;background:rgba(6,10,20,.7);padding:2px 10px;border-radius:6px;z-index:19;pointer-events:none"></div>
+
+<script type="importmap">
+{"imports":{
+  "three": "https://unpkg.com/three@0.164.1/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.164.1/examples/jsm/"
+}}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const canvas=document.getElementById('canvas');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.setSize(innerWidth,innerHeight);
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x05070e); scene.fog=new THREE.Fog(0x05070e,45,110);
+const camera=new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 300);
+camera.position.set(4,4,7);
+const controls=new OrbitControls(camera,canvas); controls.target.set(0,2.6,0); controls.enableDamping=true; controls.minDistance=2; controls.maxDistance=30;
+scene.add(new THREE.AmbientLight(0x8899cc,0.65));
+const key=new THREE.DirectionalLight(0xffffff,1.25); key.position.set(5,9,6); scene.add(key);
+const rim=new THREE.DirectionalLight(0x65e3ff,0.55); rim.position.set(-6,4,-8); scene.add(rim);
+const fill=new THREE.PointLight(0x8a6bff,0.25,25); fill.position.set(-3,3,-3); scene.add(fill);
+const grid=new THREE.GridHelper(30,30,0x2a3a5a,0x14203a); grid.position.y=0; scene.add(grid);
+const st=document.getElementById('status'), s=(m)=>{st.textContent=m;};
+const val=(id,v)=>{const e=document.getElementById(id); if(e)e.textContent=v;};
+window.__diagEl=document.getElementById('diag');
+
+// ---- material override (hero colors by mesh name) ----
+function wkm(nameLower){
+  const isWeapon=/torus|retopo_cylinder|weapon/.test(nameLower), isArmor=/armor|hat/.test(nameLower),
+        isHair=/fur_/.test(nameLower), isTeeth=/teeth|tongue/.test(nameLower),
+        isEye=/eye/.test(nameLower), isBody=/body|cloth|bottle/.test(nameLower);
+  const p=(c,o)=>({color:c,side:THREE.DoubleSide,...o});
+  if(isWeapon)return new THREE.MeshStandardMaterial(p(0xe7c05a,{metalness:.9,roughness:.28,emissive:0xff9d2e,emissiveIntensity:.10}));
+  if(isArmor)return new THREE.MeshStandardMaterial(p(0x8a3b1f,{metalness:.85,roughness:.35,emissive:0x5a1600,emissiveIntensity:.08}));
+  if(isHair)return new THREE.MeshStandardMaterial(p(0x2a1c14,{roughness:.9,metalness:0}));
+  if(isTeeth)return new THREE.MeshStandardMaterial(p(0xe8e4d8,{roughness:.5,metalness:.05}));
+  if(isEye)return new THREE.MeshStandardMaterial(p(0x0b0b10,{roughness:.25,metalness:.3}));
+  if(isBody)return new THREE.MeshStandardMaterial(p(0x9a7b52,{roughness:.8,metalness:0}));
+  return new THREE.MeshStandardMaterial(p(0x5a4632,{roughness:.6,metalness:.1}));
+}
+
+let mixer=null, root=null, skels=[];
+function loadModel(url){
+  s('loading '+url+'…');
+  new GLTFLoader().load(url,(gltf)=>{
+    root=gltf.scene; scene.add(root); window.__root=root;
+    // normalize + center + size up (target ~7.5 world units tall)
+    const box=new THREE.Box3().setFromObject(root);
+    const min=box.min, ctr=box.getCenter(new THREE.Vector3()), size=box.getSize(new THREE.Vector3());
+    root.position.x-=ctr.x; root.position.z-=ctr.z; root.position.y-=min.y;
+    const scl=7.5/Math.max(size.y,0.0001);
+    root.scale.set(scl,scl,scl);
+    root.traverse(o=>{
+      if(o.isMesh){ o.material=wkm((o.name||'').toLowerCase()); o.castShadow=false; o.receiveShadow=false; }
+      if(o.isSkinnedMesh && o.skeleton && !skels.includes(o.skeleton)) skels.push(o.skeleton);
+    });
+    const anims=gltf.animations||[];
+    val('clipVal', anims.length? anims.map(a=>a.name+' ('+a.duration.toFixed(2)+'s)').join(' · ') : '(no clips)');
+    if(anims.length && root){
+      mixer=new THREE.AnimationMixer(root);
+      const a=mixer.clipAction(anims[0]); a.reset(); a.enabled=true; a.setEffectiveWeight(1); a.setLoop(THREE.LoopRepeat,Infinity); a.play();
+      window.__wuMixer=mixer; window.__wuAction=a;
+      // ---- ROOT-ORIENTATION GUARD: HY-Motion wrote WHOLE-BODY orientation as a
+      // local rotation on the top bone; that tumbles Wukong (feet-over-head) with
+      // no root-Y to ground it. Save the top bone's rest quaternion and, each frame,
+      // slerp its local rotation back to "upright" (remove pitch/roll, keep yaw).
+      let top=null; root.traverse(o=>{ if(o.isBone && !o.parent?.isBone && !top) top=o; });
+      let rootQuat=null, rootYaw=0;
+      if(top){
+        top.updateWorldMatrix(true,true);
+        rootQuat=new THREE.Quaternion().copy(top.quaternion);        // rest local orientation
+        rootYaw=0;
+        window.__wuRootBone=top;
+      }
+      window.__wuRootGuard = { top, rootQuat, enabled:true };
+      console.log('[wu] root guard', top?top.name:'none', rootQuat);
+    }
+    // report bbox (tall = standing)
+    root.updateMatrixWorld(true);
+    const rs=new THREE.Box3().setFromObject(root).getSize(new THREE.Vector3());
+    val('bboxVal', rs.toArray().map(v=>v.toFixed(1)).join('/')+' (h='+rs.y.toFixed(1)+' tall)');
+    val('modeVal', url.indexOf('hy-animated')>=0?'HY-Motion animated': url);
+    // ---- bind the staff into Wukong's RIGHT hand so he holds it during the motion ----
+    let staffMesh=null, handR=null;
+    root.traverse(o=>{
+      if(o.isMesh && /Retopo_Cylinder|Torus|weapon/.test(o.name)) { if(!staffMesh) staffMesh=o; }
+      if(o.isBone && /^DEF-handR$/.test(o.name)) handR=o;
+    });
+    if(staffMesh && handR){
+      try{
+        handR.updateMatrixWorld(true);
+        if(staffMesh.parent) staffMesh.parent.remove(staffMesh);
+        handR.add(staffMesh);
+        staffMesh.position.set(0,0,0); staffMesh.quaternion.identity(); staffMesh.scale.set(1,1,1);
+        staffMesh.updateMatrixWorld(true);
+        s('ready · '+anims.length+' clip(s) · staff→DEF-handR · '+url);
+      }catch(e){ console.warn('staff bind failed',e); }
+    }
+    s('ready · '+anims.length+' clip(s) · '+url);
+  },undefined,(e)=>{ s('load err: '+e); });
+}
+// NOTE: loadLatestRun() is invoked at the END of this module (after RUNS_SRV and all
+// helpers are defined) — calling it here would hit the const TDZ (ReferenceError).
+
+// ---- HY-Motion generation trigger (prompt→animated Wukong via ComfyUI runner) ----
+// ---- RUN SERVER integration: prompt -> HY-Motion -> persist (SHA) -> hot-load ----
+const RUNS_SRV = 'http://127.0.0.1:8977';
+
+async function fetchRuns(){ try{ const r=await fetch(RUNS_SRV+'/runs'); if(r.ok){ const j=await r.json(); return j.runs||[]; } }catch(e){} return []; }
+async function loadLatestRun(){
+  // load the NEWEST persisted run's GLB (served at :8977). On EVERY failure we log the
+  // exact reason into the status text, then fall back to the bundled default GLB.
+  let reason='';
+  try{
+    const r=await fetch(RUNS_SRV+'/runs');
+    if(!r.ok){ reason='runs HTTP '+r.status; }
+    else {
+      const j=await r.json(); const runs=j.runs||[];
+      if(!runs.length){ reason='no runs on server'; }
+      else { loadModel(`${RUNS_SRV}/glb/`+runs[0].file.replace(/^glb\//,'')); renderRunList(runs); document.title='RUN-LOAD: ok '+runs[0].file; return; }
+    }
+  }catch(e){ reason=String(e); }
+  document.title='RUN-LOAD: '+reason;          // surfacable via tab title if DOM status gets overwritten
+  s('run-load fallback ('+reason+') → bundled default');
+  loadModel('wukong-hy-animated.glb');   // fallback: bundled default
+}
+function renderRunList(runs){
+  const box=document.getElementById('runList');
+  if(!box) return;
+  box.innerHTML='';
+  runs.slice(0,12).forEach((rn,i)=>{
+    const d=document.createElement('div');
+    d.className='run';
+    d.innerHTML=`<b>#${runs.length-i}</b> <span class="mono">${rn.sha.slice(0,16)}</span> <span class="dim">${(rn.createdAt||'').slice(11,19)}</span>`;
+    d.title=rn.prompt;
+    d.onclick=()=>{ loadModel(`${RUNS_SRV}/glb/`+rn.file.replace(/^glb\//,'')); };
+    box.appendChild(d);
+  });
+}
+
+const btnGen=document.getElementById('btnGen');
+btnGen.addEventListener('click', async ()=>{
+  const promptText=document.getElementById('prompt').value.trim();
+  if(!promptText){ s('enter a prompt'); return; }
+  const note=document.getElementById('genNote');
+  btnGen.disabled=true;
+  note.textContent='⏳ queued — HY-Motion (RTX 4090) ~3-4 min…';
+  s('queued: '+promptText.slice(0,40));
+  try{
+    const res=await fetch(RUNS_SRV+'/generate', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({ prompt:promptText }) });
+    const j0=await res.json();
+    if(!res.ok){ throw new Error(j0.error||('HTTP '+res.status)); }
+    const jobId=j0.jobId;
+    // poll job until done/error
+    const started=Date.now();
+    let job=null;
+    for(let i=0;i<600;i++){          // up to ~10 min
+      await new Promise(r=>setTimeout(r,1500));
+      try{ const r=await fetch(RUNS_SRV+'/jobs/'+jobId); if(r.ok) job=await r.json(); else job=null; }catch(e){ job=null; }
+      if(job && (job.state==='done'||job.state==='error')) break;
+      note.textContent=`⏳ ${Math.round((Date.now()-started)/1000)}s — ${job?job.state:'…'}`;
+    }
+    if(job && job.state==='done' && job.run){
+      const rn=job.run;
+      note.textContent=`✓ run persisted · sha256 ${rn.sha.slice(0,16)}… · loading…`;
+      s('done · loading run '+rn.sha.slice(0,12));
+      loadModel(`${RUNS_SRV}/glb/`+rn.file.replace(/^glb\//,''));
+      renderRunList(await fetchRuns());
+    } else {
+      throw new Error(job && job.error ? job.error : 'timed out');
+    }
+  }catch(e){
+    note.textContent='✗ '+e.message; s('generate failed');
+  }finally{ btnGen.disabled=false; }
+});
+
+// render loop
+const clock=new THREE.Clock();
+function render(){
+  requestAnimationFrame(render);
+  const dt=clock.getDelta();
+  if(mixer){ mixer.update(dt); for(const k of skels){ try{k.update();}catch(e){} } }
+  // ---- GROUND + UPRIGHT GUARD (robust): after each frame, (a) rotate the PARENT
+  // root so the character's spine stays vertical (countering any whole-body tumble
+  // from HY-Motion's global-orientation-as-local-root), and (b) pin the lowest
+  // vertex to y=0. We operate on `root`, never per-bone, so it never fights the rig.
+  if(root){
+    try{
+      root.updateMatrixWorld(true);
+      // (b-pin measured BEFORE any rotation so we can see the true foot lift)
+      let footLoPre=Infinity;
+      root.traverse(o=>{ if(o.isBone && /DEF-foot|DEF-toe|DEF-heel|heel_ik|foot_roll|ankle/i.test(o.name)){ o.updateMatrixWorld(true); const y=new THREE.Vector3().setFromMatrixPosition(o.matrixWorld).y; if(y<footLoPre) footLoPre=y; } });
+      // (a) upright (self-contained; must not prevent the floor-pin from running)
+      window.__uprightErr=null;
+      try{
+        let lowSpine=null, hiSpine=null;
+        root.traverse(o=>{ if(o.isBone){ const n=o.name;
+          if(/DEF-pelvis|DEF-root|pelvis/.test(n)&&!lowSpine){ o.updateMatrixWorld(true); lowSpine=new THREE.Vector3().setFromMatrixPosition(o.matrixWorld); }
+          if(/DEF-head|DEF-neck|head/.test(n)&&!hiSpine){ o.updateMatrixWorld(true); hiSpine=new THREE.Vector3().setFromMatrixPosition(o.matrixWorld); }
+        }});
+        if(lowSpine && hiSpine){
+          const spine=new THREE.Vector3().subVectors(hiSpine,lowSpine);
+          if(spine.lengthSq()>1e-6){
+            spine.normalize();
+            const dot=Math.max(-1,Math.min(1,spine.y));
+            if(Math.abs(dot)<0.999){
+              const axis=new THREE.Vector3().crossVectors(spine, new THREE.Vector3(0,1,0));
+              if(axis.lengthSq()>1e-6){
+                axis.normalize();
+                const ang=Math.acos(dot);
+                // r164-era Euler.setFromAxisAngle can be missing; go through Quaternion (always present)
+                const q=new THREE.Quaternion().setFromAxisAngle(axis, -ang);
+                root.rotation.setFromQuaternion(q);
+                root.updateMatrixWorld(true);
+              }
+            }
+          }
+        }
+      }catch(e){ window.__uprightErr=String(e); }
+      // (b) floor-pin: bring the lowest foot bone to y=0 in world space (always runs).
+      let footMinY=Infinity;
+      root.traverse(o=>{ if(o.isBone && (/DEF-foot|DEF-toe|DEF-heel|heel_ik|foot_roll|ankle/i.test(o.name))){ o.updateMatrixWorld(true); const y=new THREE.Vector3().setFromMatrixPosition(o.matrixWorld).y; if(y<footMinY) footMinY=y; } });
+      const pinned = isFinite(footMinY) && Math.abs(footMinY)>0.0005;
+      window.__lastPin = { pre:+footLoPre.toFixed(4), post:+footMinY.toFixed(4), pinned, rootY:+root.position.y.toFixed(4), uprightErr:window.__uprightErr };
+      if(pinned){ root.position.y -= footMinY; root.updateMatrixWorld(true); }
+      window.__lastPin.afterRootY=+root.position.y.toFixed(4);
+    }catch(e){}
+  }
+  controls.update(); renderer.render(scene,camera);
+  // live diagnostic (for agent verification): write grounding numbers into the DOM
+  const de=window.__diagEl;
+  if(de && root){
+    let skRoot=null,footLo=Infinity,footHi=-Infinity;
+    root.traverse(o=>{ if(o.isBone){ const n=o.name;
+      if(!o.parent?.isBone && !skRoot) skRoot=o;
+      if(/DEF-foot|DEF-toe|DEF-heel|heel_ik|foot_roll|ankle/i.test(n)){ o.updateMatrixWorld(true); const y=new THREE.Vector3().setFromMatrixPosition(o.matrixWorld).y; if(y<footLo)footLo=y; if(y>footHi)footHi=y; }
+    }});
+    de.textContent='root.y='+root.position.y.toFixed(3)+' | footRange='+(footLo===Infinity?'none':footLo.toFixed(3)+'..'+footHi.toFixed(3))+' | skRoot='+(skRoot?new THREE.Vector3().setFromMatrixPosition(skRoot.matrixWorld).y.toFixed(3):'?')+' | pin='+JSON.stringify(window.__lastPin||null);
+  }
+}
+window.__wu = { get root(){return root;}, get mixer(){return mixer;}, THREE };
+window.__wuDiag = () => {
+  if(!root) return 'no root';
+  const out={};
+  let skRoot=null, hips=null, handR=null;
+  root.traverse(o=>{
+    if(o.isBone && !o.parent?.isBone && !skRoot) skRoot=o;
+    if(o.isBone && /DEF-root|DEF-pelvis|DEF-spine$|hips/i.test(o.name) && !hips) hips=o;
+    if(o.isBone && /DEF-handR/.test(o.name) && !handR) handR=o;
+  });
+  const w=(o)=>{ o?.updateMatrixWorld(true); return o?new THREE.Vector3().setFromMatrixPosition(o.matrixWorld).toArray().map(v=>+v.toFixed(3)):null; };
+  out.skRootY=w(skRoot); out.hipsY=w(hips)&&w(hips)[1]; out.handR=w(handR);
+  let lowY=Infinity;
+  root.traverse(o=>{ if(o.isMesh){ o.updateMatrixWorld(true); const b=new THREE.Box3().setFromObject(o); if(b.min.y<lowY) lowY=b.min.y; } });
+  out.lowestY=lowY===Infinity?null:+lowY.toFixed(3);
+  out.rootPosY=+root.position.y.toFixed(4);
+  if(mixer) out.time=+mixer.time.toFixed(2);
+  return JSON.stringify(out);
+};
+render();
+addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+// boot: load the newest persisted HY-Motion run (must run AFTER RUNS_SRV + helpers are
+// defined, otherwise const TDZ throws ReferenceError and the run never loads)
+loadLatestRun();
+</script>
+</body>
+</html>

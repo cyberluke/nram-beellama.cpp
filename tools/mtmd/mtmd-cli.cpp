@@ -187,6 +187,7 @@ struct mtmd_cli_context {
         video_ffmpeg_bin_dir = params.video_ffmpeg_bin_dir;
         init_opt.video_params.fps_target = params.video_fps;
         init_opt.video_params.timestamp_interval_ms = params.video_timestamp_interval_ms;
+        init_opt.video_params.max_frames = params.video_max_frames;
         init_opt.video_params.ffmpeg_bin_dir = video_ffmpeg_bin_dir.empty()
                             ? nullptr : video_ffmpeg_bin_dir.c_str();
     }

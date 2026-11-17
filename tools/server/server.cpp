@@ -1,10 +1,12 @@
 #include "server-connect.h"
 #include "server-context.h"
+#include "server-beehive.h"
 #include "server-http.h"
 #include "server-models.h"
 #include "server-cors-proxy.h"
 #include "server-stream.h"
 #include "server-tools.h"
+#include "server-temporal.h"
 
 #include "arg.h"
 #include "build-info.h"
@@ -16,7 +18,9 @@
 #include <atomic>
 #include <clocale>
 #include <exception>
+#include <random>
 #include <signal.h>
+#include <sstream>
 #include <thread> // for std::thread::hardware_concurrency
 
 #if defined(_WIN32)
@@ -733,6 +737,255 @@ static int server_run_instance(common_params & params, server_role & role, commo
 // entry points
 //
 
+// BEEHIVE (experimental): single-process multi-model serving. --beehive-model
+// id=path can be repeated to register several models; all load in-process and
+// share the dedup weight plane. --beehive is required to enter this mode.
+static int server_run_beehive(common_params & params, int argc, char ** argv, const server_run_opts & opts) {
+    SRV_INF("%s", "starting server in BEEHIVE mode (single-process multi-model)\n");
+
+    server_beehive bee(params, argc, argv);
+
+    // register models from --beehive-model id=path (repeatable)
+    for (const auto & spec : params.bee_models) {
+        const auto eq = spec.find('=');
+        if (eq == std::string::npos) {
+            SRV_ERR("%s: %s", "[beehive] bad --beehive-model spec (expected id=path)", spec.c_str());
+            return 1;
+        }
+        bee.register_model(spec.substr(0, eq), spec.substr(eq + 1));
+    }
+    // Empty start is intentional (production): the server boots with zero loaded
+    // models and the remote NAI web UI populates it via POST /v1/beehive/assemblies
+    // with model ids + paths + ctx size. /v1/models lists what is registered so far.
+    if (bee.count() == 0) {
+        SRV_INF("%s", "[beehive] no pre-registered models; awaiting POST /v1/beehive/assemblies\n");
+    }
+
+    server_context ctx_server;      // a stub so routes/http layer has a context handle
+    server_mcp mcp_mgr;
+    server_http_context ctx_http;
+    if (!ctx_http.init(params)) {
+        SRV_ERR("%s", "failed to initialize HTTP server\n");
+        return 1;
+    }
+
+    // Bind /v1 dispatch: route by `model` to the matching in-process context.
+    auto beehive_handler = [&bee](const server_http_req & req) -> server_http_res_ptr {
+        std::string model_id;
+        try {
+            json body = json::parse(req.body);
+            model_id = json_value(body, "model", std::string());
+        } catch (...) {
+            // fall through: no model field
+        }
+        return beehive_dispatch(bee, model_id, req);
+    };
+
+    // (We attach handlers onto the existing routes object bound to ctx_server.)
+    server_routes routes(params, ctx_server);
+    routes.get_health            = [](const server_http_req &) -> server_http_res_ptr { auto r=std::make_unique<server_http_res>(); r->data="{\"status\":\"ok\"}"; r->status=200; return r; };
+    routes.get_metrics           = beehive_handler;
+    routes.post_chat_completions = beehive_handler;
+    routes.post_completions      = beehive_handler;
+    routes.post_embeddings       = beehive_handler;
+    routes.post_rerank           = beehive_handler;
+    routes.get_models            = [&bee](const server_http_req &) -> server_http_res_ptr { auto r=std::make_unique<server_http_res>(); r->data=bee.get_models_json().dump(); r->status=200; return r; };
+
+    server_register_routes(ctx_http, routes);
+
+    // ---- Beehive Lab-Protocol assembly endpoints ----
+    // POST /v1/beehive/assemblies : body
+    //   { "models": ["brow","abl"]  | [ {"id":"brow","path":"D:\\\\x.gguf"}, ... ],
+    //     "context_length": 8192, "kvarn_bits_k": 0, "kvarn_bits_v": 0 }
+    // Loads each named model in-process (registering by path if given), applies the
+    // per-assembly config (VRAM-optimizer / web calculator inputs), and returns the
+    // full Lab-Protocol JSON. Works even when the server booted with zero models.
+    ctx_http.post("/v1/beehive/assemblies", ex_wrapper([&bee](const server_http_req & req) -> server_http_res_ptr {
+        auto res = std::make_unique<server_http_res>();
+        res->content_type = "application/json; charset=utf-8";
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { body = json::object(); }
+
+        // Per-assembly optimization inputs (remote web calculator / VRAM optimizer).
+        const uint32_t ctx_size  = body.value("context_length", (uint64_t) 0);
+        const int      kvarn_k   = body.value("kvarn_bits_k",   (int64_t) -1); // -1 inherit base
+        const int      kvarn_v   = body.value("kvarn_bits_v",   (int64_t) -1);
+
+        json models = body.contains("models") && body["models"].is_array()
+                      ? body["models"] : json::array();
+        for (const auto & m : models) {
+            std::string id, path;
+            if (m.is_string()) {
+                id = m.get<std::string>();
+            } else if (m.is_object()) {
+                id   = m.value("id",   std::string());
+                path = m.value("path", std::string());
+            }
+            if (id.empty()) continue;
+            if (!bee.load(id, path, ctx_size, kvarn_k, kvarn_v)) {
+                SRV_WRN("[beehive] assembly: model '%s' failed/unknown to load\n", id.c_str());
+            }
+        }
+        res->data = bee.build_assembly_report(0).dump();
+        res->status = 200;
+        return res;
+    }));
+
+    // ---- Content-addressed media preprocess cache ----
+    // POST /v1/beehive/cache : body { models:[{id,content_id}], kind:"decoded_frame"|"projected_embedding"|"raw" }
+    //   Records that a preprocessing artifact for a content-identified media item exists (marked
+    //   materialized after the executor successfully ran decode/project). Refuses non-sha* content ids.
+    //   A later /v1/beehive/plan reports decoded_frames_cached / projected_embedding_cached for the
+    //   same identity so repeated identical media is not re-scheduled.
+    ctx_http.post("/v1/beehive/cache", ex_wrapper([&bee](const server_http_req & req) -> server_http_res_ptr {
+        auto res = std::make_unique<server_http_res>();
+        res->content_type = "application/json; charset=utf-8";
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { body = json::object(); }
+        const std::string kind = body.value("kind", std::string("decoded_frame"));
+        const std::string model_id = body.value("model", std::string(""));
+        int marked = 0, refused = 0;
+        if (body.contains("content_ids") && body["content_ids"].is_array()) {
+            for (const auto & c : body["content_ids"]) {
+                if (!c.is_string()) { refused++; continue; }
+                if (bee.media_cache_touch(model_id, c.get<std::string>(), kind)) marked++;
+                else refused++;
+            }
+        }
+        res->data = json({
+            {"marked", marked}, {"refused", refused},
+            {"status", "ok"},
+            {"cache", bee.media_cache_stats()},
+        }).dump();
+        res->status = 200;
+        return res;
+    }));
+
+    // ---- In-memory media ingest (media:// zero-disk fast path) ----
+    // POST /v1/beehive/media : raw bytes (application/octet-stream), optional
+    //   `?id=<opaque>` to pin a caller-chosen id. Stores the clip/photo bytes in
+    //   the in-memory register and returns { media_url: "media://<id>" }. The
+    //   bundled NAI Browser server ingests the clip it already holds in RAM here
+    //   and references the returned media_url in `input_video`/`image_url` .url,
+    //   so handle_media serves the bytes straight from memory (no temp file on
+    //   disk, no base64 over the chat JSON, no HTTP re-download). Entries are
+    //   single-consumption + TTL-bounded; reused/expired ids must be re-ingested.
+    ctx_http.post("/v1/beehive/media", ex_wrapper([](const server_http_req & req) -> server_http_res_ptr {
+        auto res = std::make_unique<server_http_res>();
+        res->content_type = "application/json; charset=utf-8";
+
+        // A pinned id must be opaque (media_id_is_opaque enforces it in put(),
+        // so a bad pin just falls through to a generated one below).
+        std::string id = req.params.count("id") ? req.params.at("id") : std::string();
+        if (id.empty()) {
+            // random 16-hex opaque id (no path/URL metacharacters)
+            std::ostringstream os;
+            std::random_device rd;
+            std::mt19937_64 gen(rd());
+            os << std::hex << gen() << gen();
+            id = os.str();
+        }
+
+        const auto & body = req.body;
+        raw_buffer bytes(body.begin(), body.end());
+        if (bytes.empty()) {
+            res->status = 400;
+            res->data = safe_json_to_str({
+                {"error", {{"message", "empty media body"}, {"type", "invalid_request_error"}}}
+            });
+            return res;
+        }
+
+        const std::string stored = media_register_put(id, std::move(bytes));
+        if (stored.empty()) {
+            res->status = 400;
+            res->data = safe_json_to_str({
+                {"error", {{"message", "invalid or non-opaque media id"}, {"type", "invalid_request_error"}}}
+            });
+            return res;
+        }
+
+        res->data = json({
+            {"status", "ok"},
+            {"media_url", "media://" + stored},
+            {"bytes", body.size()},
+        }).dump();
+        res->status = 200;
+        return res;
+    }));
+
+    // ---- Exhaustive temporal forensic AV analysis plan ----
+    // POST /v1/beehive/temporal : body
+    //   { model, media_url (media://<id>), user_prompt, total_ms?, window_ms?,
+    //     overlap_ms? (default 1000), src_fps?, max_generation?, safety? }
+    // Splits the source into consecutive two-frame-group windows tiling
+    // [0,total_ms) with a deterministic overlap, each aligned to LFM3 temporal
+    // groups (v2 Gate 5). Returns the validated window plan; the caller paces N
+    // fresh-context emit_temporal_evidence calls (one per window) + synthesis.
+    ctx_http.post("/v1/beehive/temporal", ex_wrapper([&bee](const server_http_req & req) -> server_http_res_ptr {
+        return beehive_temporal_handler(bee, req);
+    }));
+
+    // ---- Preflight multimodal resource plan ----
+    // POST /v1/beehive/plan : body { model, prompt?, media:[{type,width,height,n_frames,fps,
+    //   content_id}], context_length?, max_response_tokens? }. Returns an ESTIMATED resource
+    //   plan (configured/supported ctx, exact text tokens when loaded, mtmd-derived media token
+    //   estimate, GPU bytes, overflow decision) WITHOUT pre-decoding the recording. Consumed by
+    //   the NAI web resource optimzer before submission. Estimated-vs-measured is explicit in the
+    //   payload; exact media tokens come from mtmd_tokenize at execution.
+    ctx_http.post("/v1/beehive/plan", ex_wrapper([&bee](const server_http_req & req) -> server_http_res_ptr {
+        auto res = std::make_unique<server_http_res>();
+        res->content_type = "application/json; charset=utf-8";
+        json body;
+        try { body = json::parse(req.body); }
+        catch (...) { body = json::object(); }
+        res->data = bee.build_plan(body).dump();
+        res->status = 200;
+        return res;
+    }));
+    ctx_http.get("/v1/beehive/assemblies/:assemblyId/lab-report", ex_wrapper([&bee](const server_http_req & req) -> server_http_res_ptr {
+        auto res = std::make_unique<server_http_res>();
+        res->content_type = "application/json; charset=utf-8";
+        res->data = bee.build_assembly_report(0).dump();
+        res->status = 200;
+        return res;
+    }));
+    ctx_http.get("/v1/beehive/lab-report", ex_wrapper([&bee](const server_http_req &) -> server_http_res_ptr {
+        auto res = std::make_unique<server_http_res>();
+        res->content_type = "application/json; charset=utf-8";
+        res->data = bee.build_assembly_report(0).dump();
+        res->status = 200;
+        return res;
+    }));
+
+    if (!ctx_http.start()) {
+        SRV_ERR("%s", "exiting due to HTTP server error\n");
+        return 1;
+    }
+
+    for (const auto & spec : params.bee_models) {
+        const auto eq = spec.find('=');
+        const std::string id = spec.substr(0, eq);
+        if (!bee.load(id)) {
+            SRV_ERR("[beehive] failed to load %s\n", id.c_str());
+            return 1;
+        }
+    }
+
+    SRV_INF("[beehive] all models loaded in-process; dedup=%s\n",
+        bee.get_dedup_stats_json().dump().c_str());
+
+    // All beehive models are resident: open the serve gate so the middleware
+    // stops answering 503 "Loading model" and the endpoints become reachable.
+    ctx_http.is_ready = true;
+
+    // block until shutdown
+    ctx_http.join();
+    return 0;
+}
+
 static int server_run(common_params & params, int argc, char ** argv, server_role & role, const server_run_opts & opts) {
     common_models_handler models_handler;
 
@@ -758,6 +1011,11 @@ static int server_run(common_params & params, int argc, char ** argv, server_rol
 
     if (!server_prepare_params(params, role_type)) {
         return 1;
+    }
+
+    // BEEHIVE (experimental): single-process multi-model inference, opt-in.
+    if (params.bee_enabled) {
+        return server_run_beehive(params, argc, argv, opts);
     }
 
     switch (role_type) {

@@ -6203,8 +6203,12 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             if (req_init_opt->video_params.max_frames > 0) {
                 use_init_opt.video_params.max_frames = req_init_opt->video_params.max_frames;
             }
-            LOG_DBG("handle_completions_impl: req fps=%g max_frames=%d\n",
-                    use_init_opt.video_params.fps_target, use_init_opt.video_params.max_frames);
+            if (req_init_opt->video_params.video_token_budget > 0) {
+                use_init_opt.video_params.video_token_budget = req_init_opt->video_params.video_token_budget;
+            }
+            LOG_DBG("handle_completions_impl: req fps=%g max_frames=%d video_token_budget=%d\n",
+                    use_init_opt.video_params.fps_target, use_init_opt.video_params.max_frames,
+                    use_init_opt.video_params.video_token_budget);
         }
 
         if (data.contains("prompt_parts") && data.at("prompt_parts").is_array() && !data.at("prompt_parts").empty()) {
@@ -6888,6 +6892,16 @@ void server_routes::init_routes() {
         json body = json::parse(req.body);
         common_chat_session session;
         mtmd_helper_init_opt req_init_opt = ctx_server.init_opt;
+        // Adaptive video overflow guard: reserve a bounded slice of the slot context for
+        // the video, so a high per-request fps/frames can never exceed the slot. The
+        // frame-count clamp in mtmd_get_video_config (mtmd-helper.cpp probe) then backs
+        // off to fit instead of the request erroring "exceeds context". 1K tokens are
+        // kept for the text + generation headroom on top of the video's allowance.
+        const int32_t slot_ctx = this->meta ? this->meta->slot_n_ctx : 0;
+        const int32_t ctx_budget = std::max(0, slot_ctx - 1024);
+        if (ctx_budget > 0) {
+            req_init_opt.video_params.video_token_budget = ctx_budget;
+        }
         json body_parsed = oaicompat_chat_params_parse(
             ctx_server.vocab,
             body,
@@ -6954,6 +6968,14 @@ void server_routes::init_routes() {
         SRV_DBG("converted request: %s\n", body.dump().c_str());
         common_chat_session session;
         mtmd_helper_init_opt req_init_opt = ctx_server.init_opt;
+        // Adaptive video overflow guard (same as post_chat_completions): cap the video
+        // allowance to the slot context so fps/frames can never exceed the slot.
+        if (const int32_t slot_ctx = this->meta ? this->meta->slot_n_ctx : 0) {
+            const int32_t ctx_budget = std::max(0, slot_ctx - 1024);
+            if (ctx_budget > 0) {
+                req_init_opt.video_params.video_token_budget = ctx_budget;
+            }
+        }
         json body_parsed = oaicompat_chat_params_parse(
             ctx_server.vocab,
             body,
@@ -7219,6 +7241,14 @@ void server_routes::init_routes() {
         SRV_DBG("converted request: %s\n", body.dump().c_str());
         common_chat_session session;
         mtmd_helper_init_opt req_init_opt = ctx_server.init_opt;
+        // Adaptive video overflow guard (same as post_chat_completions): cap the video
+        // allowance to the slot context so fps/frames can never exceed the slot.
+        if (const int32_t slot_ctx = this->meta ? this->meta->slot_n_ctx : 0) {
+            const int32_t ctx_budget = std::max(0, slot_ctx - 1024);
+            if (ctx_budget > 0) {
+                req_init_opt.video_params.video_token_budget = ctx_budget;
+            }
+        }
         json body_parsed = oaicompat_chat_params_parse(
             ctx_server.vocab,
             body,

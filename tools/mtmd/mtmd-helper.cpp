@@ -542,6 +542,7 @@ struct mtmd_helper_video {
     std::string ffprobe_bin;
     float fps_target = 0.0f;
     int32_t max_frames = 0; // LFM3 max-frame cap override; 0 = the model's default
+    int32_t video_token_budget = 0; // adaptive overflow guard; 0 = unlimited
     mtmd_helper_video_info info = {};
     std::string id; // hash of the input video
 
@@ -658,7 +659,12 @@ struct mtmd_helper_video {
         std::vector<const char *> cmd = {
             ffprobe_bin.c_str(),
             "-v", "quiet",
+            // stream-level geometry/fps, plus the container (format) duration. Some
+            // MKV/WebM (e.g. VP9 ring clips) report stream duration / nb_frames as
+            // N/A even though format.duration is present; the parser below prefers
+            // the first valid (non-N/A) duration so the container duration wins.
             "-show_entries", "stream=width,height,r_frame_rate,nb_frames,duration,start_time",
+            "-show_entries", "format=duration",
             "-select_streams", "v:0",
             "-of", "default=noprint_wrappers=1",
         };
@@ -747,7 +753,49 @@ struct mtmd_helper_video {
                    : fps_target_arg > 0.0f ? fps_target_arg : orig_fps;
 
         if (cfg.n_frames > 0 && duration > 0.0f) {
-            const int32_t n = cfg.n_frames;
+            int32_t n = cfg.n_frames;
+
+            // Adopt the config's output frame size first, so the budget clamp below
+            // estimates tokens for the exact geometry that will be decoded (a resized
+            // frame yields a different token count than the source resolution).
+            if (cfg.frame_width > 0 && cfg.frame_height > 0 &&
+                    (cfg.frame_width != (int32_t) width || cfg.frame_height != (int32_t) height)) {
+                out_width  = cfg.frame_width;
+                out_height = cfg.frame_height;
+            }
+
+            // Adaptive overflow guard: if the caller supplied a video-token budget
+            // (the request's available context), cap the sampled frame count so the
+            // video's tokens can never exceed that budget. tokens_per_frame is the
+            // EXACT per-frame cost of this model at the decoded output frame size
+            // (public mtmd_get_video_frame_tokens, same estimator the real decode
+            // uses), so the clamp is exact — a high per-request fps degrades the
+            // frame count to fit instead of erroring "exceeds context".
+            if (video_token_budget > 0) {
+                // Frame geometry for the token estimate: prefer the decoded output
+                // size; fall back to the source resolution (cfg.frame_* may be 0 for
+                // processors that keep the native frame size).
+                const int est_w = out_width  > 0 ? out_width  : (int) width;
+                const int est_h = out_height > 0 ? out_height : (int) height;
+                const int32_t tpf = mtmd_get_video_frame_tokens(mctx, est_w, est_h);
+                fprintf(stderr, "[mtmd-clamp] budget=%d tpf=%d n_frames=%d est=%dx%d\n",
+                        video_token_budget, tpf, n, est_w, est_h);
+                if (tpf > 0) {
+                    const int32_t n_allow = video_token_budget / tpf;
+                    if (n_allow > 0 && n > n_allow) {
+                        LOG_INF("%s: video token budget %d clamps frames %d -> %d (~%d tok/frame)\n",
+                                __func__, video_token_budget, n, n_allow, tpf);
+                        n = n_allow;
+                    } else if (n_allow <= 0) {
+                        // even a single frame exceeds the budget; keep the minimum so
+                        // the request can still be answered rather than hard-failing
+                        n = 1;
+                        LOG_INF("%s: video token budget %d too small for even one %d-token frame; keeping 1\n",
+                                __func__, video_token_budget, tpf);
+                    }
+                }
+            }
+
             target_frames = n;
             fps_target    = (float) n / duration;
 
@@ -759,12 +807,6 @@ struct mtmd_helper_video {
             }
             src_fps      = orig_fps;
             n_src_frames = n_frames_orig;
-
-            if (cfg.frame_width > 0 && cfg.frame_height > 0 &&
-                    (cfg.frame_width != (int32_t) width || cfg.frame_height != (int32_t) height)) {
-                out_width  = cfg.frame_width;
-                out_height = cfg.frame_height;
-            }
         }
 
         if (out_width > 0 && out_height > 0) {
@@ -779,7 +821,99 @@ struct mtmd_helper_video {
                 __func__, width, height, fps_target, duration, n_frames_orig, target_frames);
         info.n_frames = target_frames > 0 ? target_frames
                       : duration > 0.0f ? (int32_t)(duration * fps_target + 0.5f) : -1;
+        // Final, all-encompassing budget solver. The supplied `video_token_budget`
+        // must never be exceeded by the emitted frames. Resolution and frame count
+        // are solved TOGETHER to maximize visible detail: a larger frame yields more
+        // tokens per frame, so we (a) upscale when there is headroom to drink as much
+        // of the budget as possible, and (b) downscale when a high per-request fps
+        // would overflow — only reducing the frame count as the last resort at the
+        // model's minimum frame geometry. This keeps as much of the clip's temporal
+        // AND spatial detail as the slot context allows.
+        if (video_token_budget > 0) {
+            const float eff_duration = duration > 0.0f ? duration : 60.0f;
+            int32_t est_frames = target_frames > 0 ? target_frames
+                               : (int32_t)(eff_duration * fps_target + 0.5f);
+            if (est_frames <= 0) est_frames = 1;
+
+            // current frame geometry (probe source or config-derived)
+            int cur_w = info.width  > 0 ? (int) info.width  : (int) width;
+            int cur_h = info.height > 0 ? (int) info.height : (int) height;
+            const int src_w = (int) width;
+            const int src_h = (int) height;
+            if (cur_w <= 0 || cur_h <= 0) cur_w = src_w, cur_h = src_h;
+
+            const double per_frame = (double) video_token_budget / (double) est_frames;
+
+            // resolve the largest frame whose per-frame token cost fits the budget
+            int32_t best_tpf = mtmd_get_video_frame_tokens(mctx, cur_w, cur_h);
+            int sel_w = cur_w, sel_h = cur_h;
+            if (best_tpf > 0 && per_frame > 0.0) {
+                // tokens ~ area (patch-based): scaling both dims by s scales cost by s^2
+                double s = std::sqrt(per_frame / (double) best_tpf);
+                // never upscale past the source resolution, or below ~1 bare patch
+                const double s_max = std::max(1.0,
+                        std::min((src_w > 0 ? (double) src_w / cur_w : 1000.0),
+                                 (src_h > 0 ? (double) src_h / cur_h : 1000.0)));
+                s = std::clamp(s, 0.05, s_max);
+                int try_w = std::max(1, (int) std::llround((double) cur_w * s));
+                int try_h = std::max(1, (int) std::llround((double) cur_h * s));
+                // bite back a step (halve the step repeatedly) until it strictly fits
+                auto fits = [&](int w, int h)->bool {
+                    int t = mtmd_get_video_frame_tokens(mctx, w, h);
+                    return t > 0 && (double) t <= per_frame;
+                };
+                if (fits(try_w, try_h)) {
+                    sel_w = try_w; sel_h = try_h;
+                    best_tpf = mtmd_get_video_frame_tokens(mctx, sel_w, sel_h);
+                } else {
+                    // overshot alignment; binary-search the largest fitting scale
+                    double lo = s_max / 1024.0, hi = s_max; // hi is known-fail already
+                    for (int it = 0; it < 24; it++) {
+                        double mid = 0.5 * (lo + hi);
+                        int mw = std::max(1, (int) std::llround((double) cur_w * mid));
+                        int mh = std::max(1, (int) std::llround((double) cur_h * mid));
+                        if (fits(mw, mh)) { lo = mid; sel_w = mw; sel_h = mh; best_tpf = mtmd_get_video_frame_tokens(mctx, mw, mh); }
+                        else { hi = mid; }
+                    }
+                }
+            }
+
+            // final safety: at the chosen (possibly downscaled) geometry, cap the frame
+            // count so total <= budget. This only bites when even min geometry overflows.
+            if (best_tpf > 0) {
+                const int32_t n_allow = (int32_t)((double) video_token_budget / (double) best_tpf);
+                if (n_allow > 0 && est_frames > n_allow) {
+                    LOG_INF("%s: video budget %d: geometry %dx%d@~%d tok/frame caps frames %d -> %d\n",
+                            __func__, video_token_budget, sel_w, sel_h, best_tpf, est_frames, n_allow);
+                    est_frames = n_allow;
+                } else if (n_allow <= 0) {
+                    LOG_INF("%s: video budget %d too small for one %d-token frame; keeping 1\n",
+                            __func__, video_token_budget, best_tpf);
+                    est_frames = 1;
+                }
+            }
+
+            // commit the resolved geometry + frame count
+            info.n_frames   = est_frames;
+            target_frames   = est_frames;
+            out_width       = sel_w;
+            out_height      = sel_h;
+            if (sel_w > 0 && sel_h > 0) { info.width = sel_w; info.height = sel_h; }
+            if (duration > 0.0f) {
+                fps_target = (float) est_frames / duration;
+                frame_indices.clear(); // continuous fps-driven sampling at the resolved fps
+            } else {
+                // unknown length: emit exactly the first est_frames source frames
+                fps_target = 0.0f;
+                frame_indices.resize(est_frames);
+                for (int32_t i = 0; i < est_frames; i++) frame_indices[i] = i;
+            }
+            LOG_INF("%s: video resolved: %dx%d, %d frames @ %.2f fps, ~%d tok/frame, est %.0f tok\n",
+                    __func__, sel_w, sel_h, est_frames, fps_target > 0 ? fps_target : (duration > 0 ? (float)est_frames/duration : 0),
+                    best_tpf, (double) best_tpf * est_frames);
+        }
         frame_buf.resize((size_t)width * height * 3);
+        fprintf(stderr, "[probe-resolved] dw=%d dh=%d frames=%d tpf=%d\n", info.width, info.height, info.n_frames, mtmd_get_video_frame_tokens(mctx, info.width, info.height));
         return true;
     }
 
@@ -787,7 +921,10 @@ struct mtmd_helper_video {
     // rate of the audio encoder; empty if the file has no audio
     void load_soundtrack() {
         const int rate = mtmd_get_audio_sample_rate(mctx);
-        if (tmpl != MTMD_VIDEO_TEMPLATE_LFM3_OMNI || frame_indices.empty() || rate <= 0) {
+        // Decode the soundtrack for LFM3-Omni regardless of whether frames are
+        // selected by explicit index or by the fps filter. (ffmpeg decodes the whole
+        // audio timeline once; the per-group slices are cut from it below.)
+        if (tmpl != MTMD_VIDEO_TEMPLATE_LFM3_OMNI || rate <= 0) {
             return;
         }
         const std::string rate_str = std::to_string(rate);
@@ -830,10 +967,19 @@ struct mtmd_helper_video {
     mtmd_bitmap * soundtrack_slice(int32_t idx) const {
         const int32_t ts_per_n_frames = this->ts_per_n_frames();
         const int32_t group    = idx / ts_per_n_frames;
-        const int32_t n_groups = ((int32_t) frame_indices.size() + ts_per_n_frames - 1) / ts_per_n_frames;
+        const int32_t n_frames = (int32_t) frame_indices.empty() ? info.n_frames : (int32_t) frame_indices.size();
+        const int32_t n_groups = std::max(1, (n_frames + ts_per_n_frames - 1) / ts_per_n_frames);
         const int     rate     = mtmd_get_audio_sample_rate(mctx);
+        // source time of the first frame of group g (frames are emitted in order);
+        // explicit-index mode uses the source frame PTS, fps mode uses the emitted fps
         auto group_start = [&](int32_t g) {
-            const double t = frame_indices[g * ts_per_n_frames] / src_fps;
+            double t;
+            if (!frame_indices.empty()) {
+                const int32_t first = g * ts_per_n_frames;
+                t = frame_indices[std::min(first, (int32_t) frame_indices.size() - 1)] / src_fps;
+            } else {
+                t = (double)(g * ts_per_n_frames) / (info.fps > 0.0f ? info.fps : 1.0f);
+            }
             return std::min(soundtrack.size(), (size_t) std::nearbyint(t * rate));
         };
         const size_t begin = group == 0 ? 0 : group_start(group);
@@ -1050,9 +1196,10 @@ struct mtmd_helper_video {
             // emit the group timestamp before the group's first frame; the value is the
             // midpoint time of the group, matching HF processors that stamp each temporal group
             const int32_t idx = current_frame - 1; // read_next_frame() already incremented
+            const int32_t n_frames = (int32_t) frame_indices.empty() ? info.n_frames : (int32_t) frame_indices.size();
             // the soundtrack of a group follows its last frame
-            const bool group_ends = idx % ts_per_n_frames == ts_per_n_frames - 1 || idx + 1 == (int32_t) frame_indices.size();
-            if (!soundtrack.empty() && !frame_indices.empty() && group_ends) {
+            const bool group_ends = idx % ts_per_n_frames == ts_per_n_frames - 1 || idx + 1 >= n_frames;
+            if (!soundtrack.empty() && group_ends) {
                 pending_audio = soundtrack_slice(idx);
             }
             if (idx % ts_per_n_frames == 0) {
@@ -1113,6 +1260,7 @@ mtmd_helper_video_init_params mtmd_helper_video_init_params_default() {
         /* timestamp_interval_ms  */ 5000,
         /* no_soundtrack          */ false,
         /* max_frames             */ 0,
+        /* video_token_budget     */ 0, // unlimited unless the caller enforces a context budget
     };
 }
 
@@ -1188,6 +1336,7 @@ mtmd_helper_video * mtmd_helper_video_init(
     ctx->timestamp_interval_ms = params.timestamp_interval_ms;
     ctx->use_video_config      = true;
     ctx->max_frames            = params.max_frames;
+    ctx->video_token_budget    = params.video_token_budget;
 
     if (!ctx->probe(params.fps_target)) {
         LOG_ERR("%s: ffprobe failed for '%s' (is ffprobe in PATH?)\n", __func__, path);
@@ -1228,6 +1377,7 @@ mtmd_helper_video * mtmd_helper_video_init_from_buf(
     ctx->timestamp_interval_ms = params.timestamp_interval_ms;
     ctx->use_video_config      = true;
     ctx->max_frames            = params.max_frames;
+    ctx->video_token_budget    = params.video_token_budget;
 
     if (!ctx->probe(params.fps_target)) {
         LOG_ERR("%s: ffprobe failed on buffer (is ffprobe in PATH?)\n", __func__);

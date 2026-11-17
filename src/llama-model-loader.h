@@ -2,6 +2,7 @@
 
 #include "llama.h"
 
+#include "llama-dedup.h"
 #include "llama-impl.h"
 #include "llama-arch.h"
 #include "llama-hparams.h"
@@ -265,6 +266,15 @@ struct llama_model_loader {
             llama_mlocks * lmlocks,
             llama_progress_callback progress_callback,
             void * progress_callback_user_data);
+
+    // BEEHIVE dedup (experimental): given a weight's byte window, decide whether
+    // an identical layer is already resident in the shared shelf. On a hit,
+    // aliases `cur` to the resident tensor's backend buffer (single VRAM address)
+    // and returns true (caller must skip materialization). On a miss, registers
+    // `cur` as the resident copy and returns false (caller proceeds normally).
+    // `data`/`n` are the raw source bytes (mapped); when unavailable, the layer
+    // is registered by provenance (name+shape+type, hash=0) only.
+    bool try_dedup_layer(struct ggml_tensor * cur, const void * data, size_t n);
 
     std::string ftype_name() const;
 

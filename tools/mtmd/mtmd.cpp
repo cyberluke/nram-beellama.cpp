@@ -2924,6 +2924,29 @@ mtmd_media_token_budget mtmd_get_media_token_budget(const mtmd_context * ctx, mt
     return budget;
 }
 
+int32_t mtmd_get_video_frame_tokens(const mtmd_context * ctx, int frame_width, int frame_height) {
+    if (!ctx->ctx_v) {
+        return -1;
+    }
+    // Use the image preprocessing (same estimator the real decode uses for one
+    // video frame). A caller-provided geometry takes precedence; fall back to the
+    // projector's default frame size when either dimension is unknown.
+    int w = frame_width;
+    int h = frame_height;
+    if (w <= 0 || h <= 0) {
+        if (!ctx->image_preproc) {
+            return -1;
+        }
+        clip_image_size def;
+        if (!ctx->image_preproc->get_video_frame_size(1, 0, 0, def)) {
+            return -1;
+        }
+        w = def.width;
+        h = def.height;
+    }
+    return clip_n_output_tokens_for_size(ctx->ctx_v, clip_image_size{w, h});
+}
+
 mtmd_counters mtmd_get_counters(const mtmd_context * ctx) {
     mtmd_counters c{};
     c.media_budget_adapt_total        = ctx->cnt_media_budget_adapt.load(std::memory_order_relaxed);

@@ -3,6 +3,8 @@
 #include "ggml-alloc.h"
 #include "ggml.h"
 #include "gguf.h"
+#include "llama-dedup.h"
+#include "llama-dedup-manifest.h"
 #include "llama-hparams.h"
 #include "llama-sinq.h"
 #include "llama.h"
@@ -1801,6 +1803,20 @@ bool llama_model_loader::load_all_data(
             const auto & mapping = mappings.at(weight->idx);
             uint8_t * data = (uint8_t *) mapping->addr() + weight->offs;
 
+            // BEEHIVE: if an identical layer is already resident, alias this
+            // tensor to the SAME VRAM address and skip the materialization below.
+            if (try_dedup_layer(cur, data, n_size)) {
+                // keep the byte range of the aliased layer mapped for the life of
+                // the load (the resident tensor's mmap-backed data may point here)
+                if (use_mmap) {
+                    auto & m = mmaps_used[weight->idx];
+                    m.first  = std::min(m.first,  weight->offs);
+                    m.second = std::max(m.second, weight->offs + n_size);
+                }
+                size_done += n_size;
+                continue;
+            }
+
             // the tensors of a file can be spread across several buffers - find the one containing this tensor's data
             ggml_backend_buffer_t buf_mmap = nullptr;
             for (const auto & buf : bufs) {
@@ -1979,6 +1995,89 @@ bool llama_model_loader::load_all_data(
 
 std::string llama_model_loader::ftype_name() const {
     return llama_ftype_name(ftype);
+}
+
+// ---------------------------------------------------------------------------
+// BEEHIVE dedup (experimental): share identical layers across loaded models as
+// one VRAM instantiation. Only unique layers are materialized; every model that
+// needs an already-resident layer is aliased to the SAME backend-buffer address
+// (cur->buffer + cur->data point into the resident tensor), so duplicate layers
+// are never resident.
+// ---------------------------------------------------------------------------
+bool llama_model_loader::try_dedup_layer(struct ggml_tensor * cur, const void * data, size_t n) {
+    static llama_dedup_registry * reg = (llama_dedup_registry *) llama_dedup_registry_get();
+
+    const int64_t * ne = cur->ne;
+    llama_dedup_key key;
+    key.name = ggml_get_name(cur) != nullptr ? ggml_get_name(cur) : "";
+    key.type = cur->type;
+    key.ne[0] = ne[0]; key.ne[1] = ne[1]; key.ne[2] = ne[2]; key.ne[3] = ne[3];
+    key.hash = (data != nullptr && n > 0) ? llama_dedup_registry::xxh64((const uint8_t *) data, n) : 0;
+
+    // Already resident and byte-identical? Alias cur to the SAME address (no upload).
+    ggml_tensor * resident = reg->find(key);
+    if (resident != nullptr) {
+        cur->buffer = resident->buffer;
+        cur->data   = resident->data;
+        cur->extra  = resident->extra;
+        reg->bump_alias();
+        LLAMA_LOG_DEBUG("%s: dedup layer '%s' -> shared address (saved nbytes=%zu)\n",
+            __func__, key.name.c_str(), (size_t) ggml_nbytes(cur));
+        return true; // skip materialization
+    }
+
+    // Tier 3 (semantic/dtype-faithful): native-domain fingerprint. Two DIFFERENT
+    // storage types of the same weights never byte-hash equal (Tier 1 miss) and
+    // must NOT collide here either (strict 1:1 graph parity) — so the semantic
+    // key folds type into the seed. We only ALIAS when a same-type twin exists
+    // (numerically-equal, quantization-noise-only duplicate that Tier 1 missed).
+    // Cross-quant matches are recorded in the manifest for the lab protocol but
+    // never force-aliased: correct block layout is preserved.
+    llama_dedup_semantic_key skey;
+    skey.name = key.name;
+    skey.ne[0] = key.ne[0]; skey.ne[1] = key.ne[1]; skey.ne[2] = key.ne[2]; skey.ne[3] = key.ne[3];
+    skey.type_tag = (uint64_t) key.type;
+    skey.fp = (data != nullptr && n > 0)
+        ? llama_dedup_registry::dtype_fingerprint(data, n, cur->type, ne)
+        : 0;
+    if (skey.fp != 0) {
+        ggml_tensor * sem = reg->find_semantic(skey);
+        if (sem != nullptr) {
+            cur->buffer = sem->buffer;
+            cur->data   = sem->data;
+            cur->extra  = sem->extra;
+            reg->bump_semantic_alias();
+            LLAMA_LOG_DEBUG("%s: dedup layer '%s' -> semantic shared address (saved nbytes=%zu)\n",
+                __func__, key.name.c_str(), (size_t) ggml_nbytes(cur));
+            return true;
+        }
+    }
+
+    // Not resident: this tensor becomes the single materialized copy.
+    reg->claim(key, cur);
+    if (skey.fp != 0) {
+        reg->claim_semantic(skey, cur);
+    }
+    // Tier 2 (shape/kernel infra): register this (shape,type) as an allocation
+    // group owner. SHARED ACROSS MODELS of the same architecture, this measures
+    // how many distinct (ne,type) allocation groups the whole shelf needs — i.e.
+    // fragment reuse / kernel-workspace reuse potential. We only TRACK the group
+    // (claims are idempotent per (ne,type)); we do NOT alias weight *data* across
+    // same-shape different-content tensors, preserving 1:1 graph parity.
+    {
+        llama_dedup_shape_key sk;
+        sk.type = cur->type;
+        sk.ne[0] = cur->ne[0]; sk.ne[1] = cur->ne[1]; sk.ne[2] = cur->ne[2]; sk.ne[3] = cur->ne[3];
+        reg->claim_shape(sk, cur);
+    }
+    // Persist a durable blob + sha256 + storage type + native-domain fingerprint
+    // for docker-like deltas across processes and the semantic lab protocol:
+    // unchanged layers are never re-fetched / re-materialized in later runs.
+    if (data != nullptr && n > 0) {
+        long long ne4[4] = { cur->ne[0], cur->ne[1], cur->ne[2], cur->ne[3] };
+        llama_dedup_manifest_persist(key.name.c_str(), (int) cur->type, ne4, data, n, skey.fp);
+    }
+    return false;
 }
 
 void llama_model_loader::print_info() const {

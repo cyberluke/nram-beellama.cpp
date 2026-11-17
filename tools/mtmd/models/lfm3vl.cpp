@@ -72,7 +72,19 @@ ggml_cgraph * clip_graph_lfm3vl::build() {
                     ggml_permute(ctx0, gated_3d, 2, 0, 1, 3));
                 cb(gated_2d, "conv_gated_2d", il);
 
-                conv_out = ggml_conv_2d_dw_direct(ctx0, layer.conv2d_spatial_w, gated_2d,
+                // The depthwise spatial kernel must be laid out [KW, KH, 1, C] for
+                // ggml_conv_2d_dw_direct (it asserts a->ne[2] == 1). Some LFM3-VL
+                // finetunes export it with the single channel axis leading, as
+                // [1, KW, KH, C] (e.g. Duckets lfm3-vl-2b-browseragent). The element
+                // order is identical (dim0 == 1, dim2 == 1), so a plain reshape to the
+                // canonical layout is numerically exact; without it the graph asserts.
+                ggml_tensor * conv_w = layer.conv2d_spatial_w;
+                if (conv_w->ne[0] == 1 && conv_w->ne[2] != 1) {
+                    conv_w = ggml_reshape_4d(ctx0, conv_w,
+                        conv_w->ne[1], conv_w->ne[2], 1, conv_w->ne[3]);
+                }
+
+                conv_out = ggml_conv_2d_dw_direct(ctx0, conv_w, gated_2d,
                     1, 1, 1, 1, 1, 1);
                 cb(conv_out, "conv_spatial", il);
 
